@@ -1,0 +1,10 @@
+--- a/tools/workspace/mbed/repository.bzl
++++ b/tools/workspace/mbed/repository.bzl
+@@ -172,6 +172,7 @@
+
+     repository_ctx.download_and_extract(
+         url = [
++            "https://gitrepo.xr.private:2020/xtellar-foc/moteus/mbed-os-releases/-/raw/master/mbed-os-5.13.4.tar.gz",
+             "https://github.com/ARMmbed/mbed-os/archive/mbed-os-5.13.4.tar.gz",
+         ],
+         sha256 = "5c291c1df779834224437043e2274bd1b54216b01e145c1754ac6cd8890cb12e",

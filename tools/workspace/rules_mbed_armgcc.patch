@@ -1,0 +1,10 @@
+--- a/tools/workspace/arm_gcc/repository.bzl
++++ b/tools/workspace/arm_gcc/repository.bzl
+@@ -21,6 +21,7 @@
+     http_archive(
+         name = name,
+         urls = [
++            "https://gitrepo.xr.private:2020/xtellar-foc/moteus/mbed-os-releases/-/raw/master/arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz",
+             "https://armkeil.blob.core.windows.net/developer/files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz",
+         ],
+         sha256 = "597893282ac8c6ab1a4073977f2362990184599643b4c5ee34870a8215783a16",

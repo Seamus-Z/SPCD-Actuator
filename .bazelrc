@@ -1,0 +1,8 @@
+build --enable_workspace
+build --cpu=stm32g4
+build --platforms=@com_github_mjbots_rules_mbed//:stm32g4
+build --incompatible_enable_cc_toolchain_resolution
+build --compiler=compiler
+build --nostart_end_lib
+build -c opt
+build --stamp

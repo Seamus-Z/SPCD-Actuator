@@ -1,0 +1,27 @@
+# Bazel symlinks / outputs
+/bazel-*
+
+# Pi / Cursor agent local state
+.pi/
+
+# Accidental nested home/cache paths
+/home/
+
+# Editor / OS junk
+*~
+*.swp
+*.swo
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Local temp
+tmp/
+*.log
