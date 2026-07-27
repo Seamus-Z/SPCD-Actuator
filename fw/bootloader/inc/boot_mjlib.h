@@ -21,17 +21,21 @@
 
 // Avoid <ios> — it pulls in <system_error> which requires libstdc++ linking.
 // We only need std::streamsize which is just a signed integer type.
-namespace std {
+namespace std
+{
 using streamsize = std::ptrdiff_t;
 }
 
 // ============================================================================
 // mjlib::base::string_span
 // ============================================================================
-namespace mjlib {
-namespace base {
+namespace mjlib
+{
+namespace base
+{
 
-class string_span {
+class string_span
+{
  public:
   using iterator = char*;
   using const_iterator = const char*;
@@ -67,13 +71,15 @@ class string_span {
 // ============================================================================
 // mjlib::base::ReadStream / WriteStream (abstract)
 // ============================================================================
-class WriteStream {
+class WriteStream
+{
  public:
   virtual ~WriteStream() {}
   virtual void write(const std::string_view&) = 0;
 };
 
-class ReadStream {
+class ReadStream
+{
  public:
   virtual ~ReadStream() {}
   virtual void ignore(std::streamsize) = 0;
@@ -84,19 +90,24 @@ class ReadStream {
 // ============================================================================
 // mjlib::base::BufferWriteStream / BufferReadStream
 // ============================================================================
-class BufferWriteStream : public WriteStream {
+class BufferWriteStream : public WriteStream
+{
  public:
   BufferWriteStream(const string_span& buffer) : buffer_(buffer) {}
 
-  void write(const std::string_view& data) override {
-    if (static_cast<std::streamsize>(offset_ + data.size()) <= buffer_.size()) {
+  void write(const std::string_view& data) override
+  {
+    if (static_cast<std::streamsize>(offset_ + data.size()) <= buffer_.size())
+    {
       std::memcpy(&buffer_[offset_], data.data(), data.size());
       offset_ += data.size();
     }
   }
 
-  void skip(std::streamsize amount) {
-    if ((offset_ + amount) <= static_cast<std::streamsize>(buffer_.size())) {
+  void skip(std::streamsize amount)
+  {
+    if ((offset_ + amount) <= static_cast<std::streamsize>(buffer_.size()))
+    {
       offset_ += amount;
     }
   }
@@ -111,21 +122,25 @@ class BufferWriteStream : public WriteStream {
   std::streamsize offset_ = 0;
 };
 
-class BufferReadStream : public ReadStream {
+class BufferReadStream : public ReadStream
+{
  public:
   BufferReadStream(const std::string_view& buffer) : buffer_(buffer) {}
 
-  void ignore(std::streamsize amount) override {
+  void ignore(std::streamsize amount) override
+  {
     std::streamsize to_ignore = std::min<std::streamsize>(amount, buffer_.size() - offset_);
     fast_ignore(to_ignore);
   }
 
-  void fast_ignore(std::streamsize to_ignore) {
+  void fast_ignore(std::streamsize to_ignore)
+  {
     last_read_ = to_ignore;
     offset_ += last_read_;
   }
 
-  void read(const string_span& buffer) override {
+  void read(const string_span& buffer) override
+  {
     std::streamsize to_read = std::min<std::streamsize>(buffer.size(), buffer_.size() - offset_);
     last_read_ = to_read;
     std::memcpy(buffer.data(), &buffer_[offset_], last_read_);
@@ -146,18 +161,22 @@ class BufferReadStream : public ReadStream {
 // ============================================================================
 // mjlib::base::Tokenizer
 // ============================================================================
-class Tokenizer {
+class Tokenizer
+{
  public:
   Tokenizer(const std::string_view& source, const char* delimiters)
       : source_(source), delimiters_(delimiters), position_(source_.cbegin()) {}
 
-  std::string_view next() {
+  std::string_view next()
+  {
     if (position_ == source_.end()) { return {}; }
     const auto start = position_;
     auto my_next = position_;
     bool found = false;
-    for (; my_next != source_.end(); ++my_next) {
-      if (std::strchr(delimiters_, *my_next) != nullptr) {
+    for (; my_next != source_.end(); ++my_next)
+    {
+      if (std::strchr(delimiters_, *my_next) != nullptr)
+      {
         position_ = my_next;
         ++position_;
         found = true;
@@ -168,7 +187,8 @@ class Tokenizer {
     return std::string_view(&*start, my_next - start);
   }
 
-  std::string_view remaining() const {
+  std::string_view remaining() const
+  {
     if (position_ == source_.end()) { return {}; }
     return std::string_view(&*position_, source_.end() - position_);
   }

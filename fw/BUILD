@@ -15,18 +15,26 @@ BAREMETAL_LINKOPTS = [
     "-Wl,--gc-sections",
 ]
 
-# === Bootloader (bare-metal, CMSIS headers from mbed-g4) ===
-# .vectors at 0x08000000, code at 0x0800C000
+# === Bootloader ===
+# Package root keeps only vectors.S + linker script; code under inc/ + src/.
 cc_binary(
     name = "bootloader.elf",
     srcs = [
-        "bootloader/bootloader.cc",
+        "bootloader/src/bootloader.cc",
+        "bootloader/src/BL_CanDriver.cc",
+        "bootloader/src/BL_FlashWriter.cc",
+        "bootloader/src/BL_CommandServer.cc",
+        "bootloader/inc/BL_CanDriver.h",
+        "bootloader/inc/BL_FlashWriter.h",
+        "bootloader/inc/BL_CommandServer.h",
+        "bootloader/inc/BL_Config.h",
+        "bootloader/inc/boot_mjlib.h",
+        "bootloader/inc/stm32g4xx_fdcan_typedefs.h",
+        "bootloader/inc/bootloader.h",
         "bootloader/vectors.S",
-        "bootloader/boot_mjlib.h",
-        "bootloader/stm32g4xx_fdcan_typedefs.h",
-        "bootloader/bootloader.h",
     ],
     deps = ["@com_github_ARMmbed_mbed-g4//:mbed"],
+    includes = ["bootloader/inc"],
     copts = BAREMETAL_COPTS + ["-std=c++17"],
     linkopts = BAREMETAL_LINKOPTS + ["-T$(location bootloader/stm32g474_bootloader.ld)"],
     additional_linker_inputs = ["bootloader/stm32g474_bootloader.ld"],
@@ -40,40 +48,40 @@ genrule(
     toolchains = ["@bazel_tools//tools/cpp:current_cc_toolchain"],
 )
 
-# === Application (bare-metal, CMSIS headers from mbed-g4) ===
-# .isr_vector + code at 0x08010000
+# === Application ===
+# main.cpp holds the Application state machine + CRT entry.
 cc_binary(
     name = "app.elf",
     srcs = [
-        "main.cpp",
-        "app_vectors.S",
-        "bootloader/enter_bootloader.cc",
-        "bootloader/bootloader.h",
+        "app/main.cpp",
+        "app/app_vectors.S",
+        "bootloader/src/enter_bootloader.cc",
+        "bootloader/inc/bootloader.h",
     ],
     deps = [
         "//fw/HAL:hal",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],
+    includes = [
+        ".",
+        "bootloader/inc",
+    ],
     copts = BAREMETAL_COPTS + ["-std=c++17"],
-    linkopts = BAREMETAL_LINKOPTS + ["-T$(location stm32g474_app.ld)"],
-    additional_linker_inputs = ["stm32g474_app.ld"],
+    linkopts = BAREMETAL_LINKOPTS + ["-T$(location app/stm32g474_app.ld)"],
+    additional_linker_inputs = ["app/stm32g474_app.ld"],
 )
 
-# === Combined flash image (ISR + bootloader + app) ===
 genrule(
     name = "xtellar.combined",
     srcs = ["bootloader.elf", "app_binary"],
     outs = ["xtellar.combined.bin"],
     cmd = (
-        # Bootloader: .vectors at 0x08000000, code at 0x0800C000 (linker handles layout)
         "$(OBJCOPY) -O binary $(location bootloader.elf) $(@D)/bl_full.bin && " +
         "python3 -c \"import os,sys;s=os.path.getsize('$(@D)/bl_full.bin');" +
         "sys.exit('bootloader binary too big (%d > 65536)' % s) if s > 65536 else 0\" && " +
         "cp $(@D)/bl_full.bin $@ && " +
-        # Pad to app start at 0x10000 (65536) if bootloader is smaller
         "python3 -c \"import os;f=open('$@','ab');s=os.fstat(f.fileno()).st_size;" +
         "f.truncate(max(s,65536))\" && " +
-        # App at 0x08010000
         "cat $(location app_binary) >> $@"
     ),
     toolchains = ["@bazel_tools//tools/cpp:current_cc_toolchain"],

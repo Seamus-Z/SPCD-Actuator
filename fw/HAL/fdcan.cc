@@ -3,15 +3,20 @@
 #include <algorithm>
 #include <cstring>
 
-namespace hal {
-namespace {
+namespace hal
+{
+namespace
+{
 
-[[noreturn]] void Halt() {
-  while (true) {
+[[noreturn]] void Halt()
+{
+  while (true)
+  {
   }
 }
 
-uint32_t RoundUpDlc(size_t size) {
+uint32_t RoundUpDlc(size_t size)
+{
   if (size == 0) { return FDCAN_DLC_BYTES_0; }
   if (size == 1) { return FDCAN_DLC_BYTES_1; }
   if (size == 2) { return FDCAN_DLC_BYTES_2; }
@@ -31,34 +36,41 @@ uint32_t RoundUpDlc(size_t size) {
   return FDCAN_DLC_BYTES_64;
 }
 
-bool ApplyOverride(bool value, FDCan::Override o) {
-  switch (o) {
-    case FDCan::Override::kDefault: return value;
-    case FDCan::Override::kRequire: return true;
-    case FDCan::Override::kDisable: return false;
+bool ApplyOverride(bool value, FDCan::Override o)
+{
+  switch (o)
+  {
+    case FDCan::Override::DEFAULT: return value;
+    case FDCan::Override::REQUIRE: return true;
+    case FDCan::Override::DISABLE: return false;
   }
   Halt();
 }
 
-FDCan::Rate MakeTime(int bitrate, int max_time_seg1, int max_time_seg2) {
+FDCan::Rate MakeTime(int bitrate, int max_time_seg1, int max_time_seg2)
+{
   FDCan::Rate result;
   result.prescaler = 1;
 
   // App currently runs from reset HSI; keep SystemCoreClock coherent so
   // HAL_RCC_GetPCLK1Freq() yields a usable bit-timing base.
-  if (SystemCoreClock == 0) {
+  if (SystemCoreClock == 0)
+  {
     SystemCoreClock = 16000000;
   }
 
   const uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-  if (pclk1 == 0 || bitrate <= 0) {
+  if (pclk1 == 0 || bitrate <= 0)
+  {
     Halt();
   }
 
-  while (true) {
+  while (true)
+  {
     const uint32_t total_divisor = (pclk1 / static_cast<uint32_t>(result.prescaler)) /
                                    static_cast<uint32_t>(bitrate);
-    if (total_divisor < 1) {
+    if (total_divisor < 1)
+    {
       Halt();
     }
 
@@ -68,7 +80,8 @@ FDCan::Rate MakeTime(int bitrate, int max_time_seg1, int max_time_seg2) {
     result.sync_jump_width = std::min(16, result.time_seg2);
 
     if (result.time_seg1 > max_time_seg1 || result.time_seg2 > max_time_seg2 ||
-        result.time_seg1 < 1 || result.time_seg2 < 1) {
+        result.time_seg1 < 1 || result.time_seg2 < 1)
+    {
       result.prescaler++;
       continue;
     }
@@ -78,9 +91,11 @@ FDCan::Rate MakeTime(int bitrate, int max_time_seg1, int max_time_seg2) {
   return result;
 }
 
-FDCan::Rate ApplyRateOverride(FDCan::Rate base, FDCan::Rate overlay) {
+FDCan::Rate ApplyRateOverride(FDCan::Rate base, FDCan::Rate overlay)
+{
   if (overlay.prescaler >= 0) { base.prescaler = overlay.prescaler; }
-  if (overlay.sync_jump_width >= 0) {
+  if (overlay.sync_jump_width >= 0)
+  {
     base.sync_jump_width = overlay.sync_jump_width;
   }
   if (overlay.time_seg1 >= 0) { base.time_seg1 = overlay.time_seg1; }
@@ -90,18 +105,22 @@ FDCan::Rate ApplyRateOverride(FDCan::Rate base, FDCan::Rate overlay) {
 
 }  // namespace
 
-FDCan::FDCan(const Options& options) : options_(options) {
+FDCan::FDCan(const Options& options) : options_(options)
+{
   Init();
 }
 
-void FDCan::ConfigureFilters(const FilterConfig& filters) {
+void FDCan::ConfigureFilters(const FilterConfig& filters)
+{
   options_.filters = filters;
   Init();
 }
 
-void FDCan::ConfigurePins() {
+void FDCan::ConfigurePins()
+{
   // First-batch hardware map: FDCAN2 on PB5(RX AF9) / PB6(TX AF9).
-  if (options_.instance != FDCAN2) {
+  if (options_.instance != FDCAN2)
+  {
     Halt();
   }
 
@@ -116,7 +135,8 @@ void FDCan::ConfigurePins() {
   HAL_GPIO_Init(GPIOB, &gpio);
 }
 
-void FDCan::Init() {
+void FDCan::Init()
+{
   // FDCAN kernel clock: PCLK1 (reset default is HSE, which is not enabled).
   __HAL_RCC_FDCAN_CLK_ENABLE();
   RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_FDCANSEL_Msk) |
@@ -127,20 +147,26 @@ void FDCan::Init() {
   std::memset(&handle_, 0, sizeof(handle_));
   handle_.Instance = options_.instance;
   handle_.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  handle_.Init.FrameFormat = [&]() {
-    if (options_.fdcan_frame && options_.bitrate_switch) {
+  handle_.Init.FrameFormat = [&]()
+  {
+    if (options_.fdcan_frame && options_.bitrate_switch)
+    {
       return FDCAN_FRAME_FD_BRS;
     }
-    if (options_.fdcan_frame) {
+    if (options_.fdcan_frame)
+    {
       return FDCAN_FRAME_FD_NO_BRS;
     }
     return FDCAN_FRAME_CLASSIC;
   }();
-  handle_.Init.Mode = [&]() {
-    if (options_.bus_monitor) {
+  handle_.Init.Mode = [&]()
+  {
+    if (options_.bus_monitor)
+    {
       return FDCAN_MODE_BUS_MONITORING;
     }
-    if (options_.restricted_mode) {
+    if (options_.restricted_mode)
+    {
       return FDCAN_MODE_RESTRICTED_OPERATION;
     }
     return FDCAN_MODE_NORMAL;
@@ -171,88 +197,102 @@ void FDCan::Init() {
 
   handle_.Init.StdFiltersNbr = 0;
   handle_.Init.ExtFiltersNbr = 0;
-  if (options_.filters.begin != nullptr && options_.filters.end != nullptr) {
+  if (options_.filters.begin != nullptr && options_.filters.end != nullptr)
+  {
     handle_.Init.StdFiltersNbr = static_cast<uint32_t>(std::count_if(
-        options_.filters.begin, options_.filters.end, [](const Filter& f) {
-          return f.action != FilterAction::kDisable &&
-                 f.type == FilterType::kStandard;
+        options_.filters.begin, options_.filters.end, [](const Filter& f)
+    {
+          return f.action != FilterAction::DISABLE &&
+                 f.type == FilterType::STANDARD;
         }));
     handle_.Init.ExtFiltersNbr = static_cast<uint32_t>(std::count_if(
-        options_.filters.begin, options_.filters.end, [](const Filter& f) {
-          return f.action != FilterAction::kDisable &&
-                 f.type == FilterType::kExtended;
+        options_.filters.begin, options_.filters.end, [](const Filter& f)
+    {
+          return f.action != FilterAction::DISABLE &&
+                 f.type == FilterType::EXTENDED;
         }));
   }
   handle_.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
 
-  if (HAL_FDCAN_Init(&handle_) != HAL_OK) {
+  if (HAL_FDCAN_Init(&handle_) != HAL_OK)
+  {
     Halt();
   }
 
-  if (options_.filters.begin != nullptr && options_.filters.end != nullptr) {
+  if (options_.filters.begin != nullptr && options_.filters.end != nullptr)
+  {
     int standard_index = 0;
     int extended_index = 0;
     std::for_each(
         options_.filters.begin, options_.filters.end,
-        [&](const Filter& filter) {
-          if (filter.action == FilterAction::kDisable) {
+        [&](const Filter& filter)
+    {
+          if (filter.action == FilterAction::DISABLE)
+          {
             return;
           }
 
           FDCAN_FilterTypeDef cfg = {};
-          cfg.IdType = (filter.type == FilterType::kStandard)
+          cfg.IdType = (filter.type == FilterType::STANDARD)
                            ? FDCAN_STANDARD_ID
                            : FDCAN_EXTENDED_ID;
-          cfg.FilterIndex = (filter.type == FilterType::kStandard)
+          cfg.FilterIndex = (filter.type == FilterType::STANDARD)
                                 ? standard_index++
                                 : extended_index++;
-          switch (filter.mode) {
-            case FilterMode::kRange:
+          switch (filter.mode)
+          {
+            case FilterMode::RANGE:
               cfg.FilterType = FDCAN_FILTER_RANGE;
               break;
-            case FilterMode::kDual:
+            case FilterMode::DUAL:
               cfg.FilterType = FDCAN_FILTER_DUAL;
               break;
-            case FilterMode::kMask:
+            case FilterMode::MASK:
               cfg.FilterType = FDCAN_FILTER_MASK;
               break;
           }
-          switch (filter.action) {
-            case FilterAction::kDisable:
-            case FilterAction::kReject:
+          switch (filter.action)
+          {
+            case FilterAction::DISABLE:
+            case FilterAction::REJECT:
               cfg.FilterConfig = FDCAN_FILTER_REJECT;
               break;
-            case FilterAction::kAccept:
+            case FilterAction::ACCEPT:
               cfg.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
               break;
           }
           const uint32_t mask =
-              (filter.type == FilterType::kStandard) ? 0x7FFu : 0x1FFFFFFFu;
+              (filter.type == FilterType::STANDARD) ? 0x7FFu : 0x1FFFFFFFu;
           cfg.FilterID1 = filter.id1 & mask;
           cfg.FilterID2 = filter.id2 & mask;
 
-          if (HAL_FDCAN_ConfigFilter(&handle_, &cfg) != HAL_OK) {
+          if (HAL_FDCAN_ConfigFilter(&handle_, &cfg) != HAL_OK)
+          {
             Halt();
           }
         });
   }
 
-  auto map_filter_action = [](FilterAction value) {
-    switch (value) {
-      case FilterAction::kDisable:
-      case FilterAction::kAccept:
+  auto map_filter_action = [](FilterAction value)
+  {
+    switch (value)
+    {
+      case FilterAction::DISABLE:
+      case FilterAction::ACCEPT:
         return FDCAN_ACCEPT_IN_RX_FIFO0;
-      case FilterAction::kReject:
+      case FilterAction::REJECT:
         return FDCAN_REJECT;
     }
     Halt();
   };
-  auto map_remote_action = [](FilterAction value) {
-    switch (value) {
-      case FilterAction::kDisable:
-      case FilterAction::kAccept:
+  auto map_remote_action = [](FilterAction value)
+  {
+    switch (value)
+    {
+      case FilterAction::DISABLE:
+      case FilterAction::ACCEPT:
         return FDCAN_FILTER_REMOTE;
-      case FilterAction::kReject:
+      case FilterAction::REJECT:
         return FDCAN_REJECT_REMOTE;
     }
     Halt();
@@ -264,37 +304,44 @@ void FDCan::Init() {
           map_filter_action(options_.filters.global_ext_action),
           map_remote_action(options_.filters.global_remote_std_action),
           map_remote_action(options_.filters.global_remote_ext_action)) !=
-      HAL_OK) {
+      HAL_OK)
+  {
     Halt();
   }
 
-  if (options_.delay_compensation) {
+  if (options_.delay_compensation)
+  {
     if (HAL_FDCAN_ConfigTxDelayCompensation(
-            &handle_, options_.tdc_offset, options_.tdc_filter) != HAL_OK) {
+            &handle_, options_.tdc_offset, options_.tdc_filter) != HAL_OK)
+    {
       Halt();
     }
-    if (HAL_FDCAN_EnableTxDelayCompensation(&handle_) != HAL_OK) {
+    if (HAL_FDCAN_EnableTxDelayCompensation(&handle_) != HAL_OK)
+    {
       Halt();
     }
   } else {
-    if (HAL_FDCAN_DisableTxDelayCompensation(&handle_) != HAL_OK) {
+    if (HAL_FDCAN_DisableTxDelayCompensation(&handle_) != HAL_OK)
+    {
       Halt();
     }
   }
 
-  if (HAL_FDCAN_Start(&handle_) != HAL_OK) {
+  if (HAL_FDCAN_Start(&handle_) != HAL_OK)
+  {
     Halt();
   }
 }
 
-bool FDCan::Send(uint32_t dest_id, std::string_view data) {
+bool FDCan::Send(uint32_t dest_id, std::string_view data)
+{
   return Send(dest_id, data, SendOptions());
 }
 
-bool FDCan::Send(uint32_t dest_id,
-                 std::string_view data,
-                 const SendOptions& send_options) {
-  if (last_tx_request_) {
+bool FDCan::Send(uint32_t dest_id, std::string_view data, const SendOptions& send_options)
+{
+  if (last_tx_request_)
+  {
     HAL_FDCAN_AbortTxRequest(&handle_, last_tx_request_);
   }
 
@@ -323,52 +370,59 @@ bool FDCan::Send(uint32_t dest_id,
 
   uint8_t payload[64] = {};
   const size_t copy_len = std::min(data.size(), sizeof(payload));
-  if (copy_len > 0) {
+  if (copy_len > 0)
+  {
     std::memcpy(payload, data.data(), copy_len);
   }
 
-  if (HAL_FDCAN_AddMessageToTxFifoQ(&handle_, &tx_header, payload) != HAL_OK) {
+  if (HAL_FDCAN_AddMessageToTxFifoQ(&handle_, &tx_header, payload) != HAL_OK)
+  {
     return false;
   }
   last_tx_request_ = HAL_FDCAN_GetLatestTxFifoQRequestBuffer(&handle_);
   return true;
 }
 
-bool FDCan::Poll(FDCAN_RxHeaderTypeDef* header,
-                 uint8_t* data,
-                 size_t max_len,
-                 size_t* out_len) {
-  if (header == nullptr || data == nullptr || out_len == nullptr) {
+bool FDCan::Poll(FDCAN_RxHeaderTypeDef* header, uint8_t* data, size_t max_len, size_t* out_len)
+{
+  if (header == nullptr || data == nullptr || out_len == nullptr)
+  {
     return false;
   }
 
   uint8_t scratch[64] = {};
   if (HAL_FDCAN_GetRxMessage(&handle_, FDCAN_RX_FIFO0, header, scratch) !=
-      HAL_OK) {
+      HAL_OK)
+  {
     return false;
   }
 
   const int payload_len = ParseDlc(header->DataLength);
   const size_t copy_len =
       std::min(static_cast<size_t>(payload_len), max_len);
-  if (copy_len > 0) {
+  if (copy_len > 0)
+  {
     std::memcpy(data, scratch, copy_len);
   }
   *out_len = copy_len;
   return true;
 }
 
-void FDCan::RecoverBusOff() {
+void FDCan::RecoverBusOff()
+{
   handle_.Instance->CCCR &= ~FDCAN_CCCR_INIT;
 }
 
-FDCAN_ProtocolStatusTypeDef FDCan::status() {
+FDCAN_ProtocolStatusTypeDef FDCan::status()
+{
   HAL_FDCAN_GetProtocolStatus(&handle_, &status_result_);
   return status_result_;
 }
 
-int FDCan::ParseDlc(uint32_t dlc_code) {
-  switch (dlc_code) {
+int FDCan::ParseDlc(uint32_t dlc_code)
+{
+  switch (dlc_code)
+  {
     case FDCAN_DLC_BYTES_0: return 0;
     case FDCAN_DLC_BYTES_1: return 1;
     case FDCAN_DLC_BYTES_2: return 2;
@@ -393,7 +447,8 @@ int FDCan::ParseDlc(uint32_t dlc_code) {
 
 // Clock enable is done in FDCan::Init before HAL_FDCAN_Init; keep the weak
 // MSP hook so HAL's call chain remains valid without extra NVIC setup.
-extern "C" void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan) {
+extern "C" void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
+{
   (void)hfdcan;
   __HAL_RCC_FDCAN_CLK_ENABLE();
 }
