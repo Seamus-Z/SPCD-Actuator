@@ -18,9 +18,10 @@ __pycache__/
 *.pyc
 .venv/
 
-# IDE
+# IDE / clangd index
 .vscode/
 .idea/
+.cache/
 
 # Local temp
 tmp/

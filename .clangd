@@ -1,0 +1,29 @@
+# Use compile_commands.json when present; also keep Add flags as fallback.
+# Headers live under third_party/mbed-g4 (symlink) so they are NOT under
+# gitignored /bazel-* (clangd skips gitignored paths for go-to-definition).
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - -std=c++17
+    - -DSTM32G474xx
+    - -DUSE_HAL_DRIVER
+    - -DTARGET_STM
+    - -DTARGET_STM32G4
+    - -DTARGET_STM32G474xE
+    - -DSTM32G4
+    - -Ifw
+    - -Ifw/bootloader/inc
+    - -Ifw/HAL
+    - -Ithird_party/mbed-g4
+    - -Ithird_party/mbed-g4/cmsis
+    - -Ithird_party/mbed-g4/cmsis/TARGET_CORTEX_M
+    - -Ithird_party/mbed-g4/hal
+    - -Ithird_party/mbed-g4/platform
+    - -Ithird_party/mbed-g4/targets/TARGET_STM
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/device
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/device
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE/device
+Index:
+  Background: Build
