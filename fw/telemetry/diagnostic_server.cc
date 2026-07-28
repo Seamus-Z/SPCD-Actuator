@@ -273,6 +273,8 @@ void DiagnosticServer::HandleCommand(std::string_view verb,
     CopyName(channel_name_, sizeof(channel_name_), "drv8353s");
   } else if (verb == "status") {
     CopyName(channel_name_, sizeof(channel_name_), "status");
+  } else if (verb == "mem") {
+    CopyName(channel_name_, sizeof(channel_name_), "mem");
   } else {
     writer.write("ERR unknown command\r\n");
     return;

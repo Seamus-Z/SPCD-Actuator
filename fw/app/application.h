@@ -4,6 +4,7 @@
 #include "HAL/fdcan.h"
 #include "HAL/millisecond_timer.h"
 #include "device/drv8353s.h"
+#include "pool/pool.h"
 #include "telemetry/diagnostic_server.h"
 #include "telemetry/status_registry.h"
 
@@ -22,12 +23,15 @@ class Application
 {
  public:
   static constexpr const char* kTelemetryChannel = "status";
+  static constexpr const char* kMemTelemetryChannel = "mem";
 
-  Application();
+  // |pool| must outlive this object; child modules are allocated from it.
+  explicit Application(::pool::Pool* pool);
 
   [[noreturn]] void Run();
 
   State state() const { return state_; }
+  ::pool::Pool* pool() const { return pool_; }
 
  private:
   bool Init();
@@ -38,16 +42,19 @@ class Application
   void RegisterTelemetry();
 
   static size_t TelemetryExport(void* context, char* out, size_t out_capacity);
+  static size_t MemTelemetryExport(void* context, char* out, size_t out_capacity);
   size_t FormatTelemetry(char* out, size_t out_capacity) const;
+  size_t FormatMemTelemetry(char* out, size_t out_capacity) const;
 
   State state_ = State::INIT;
-  // timer_ must outlive gate_driver_ (shared TIM_MST busy-wait).
-  hal::MillisecondTimer timer_;
-  hal::FDCan can_;
-  device::Drv8353s gate_driver_;
+  ::pool::Pool* pool_ = nullptr;
 
-  telemetry::StatusRegistry registry_;
-  telemetry::DiagnosticServer diagnostic_;
+  // Construction order = lifetime / dependency order.
+  ::pool::PoolPtr<hal::MillisecondTimer> timer_;
+  ::pool::PoolPtr<hal::FDCan> can_;
+  ::pool::PoolPtr<device::Drv8353s> gate_driver_;
+  ::pool::PoolPtr<telemetry::StatusRegistry> registry_;
+  ::pool::PoolPtr<telemetry::DiagnosticServer> diagnostic_;
 };
 
 }  // namespace app

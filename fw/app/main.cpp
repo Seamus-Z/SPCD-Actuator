@@ -1,13 +1,15 @@
-// CRT entry only. Application lives in application.cc.
+// CRT entry only. Application and modules live in an explicit static pool.
 #include <new>
 
 #include "application.h"
+#include "pool/pool.h"
 #include "stm32g4xx.h"
 
 namespace
 {
-// Large object off the MSP stack (moteus keeps big state in pool/static storage).
-alignas(app::Application) uint8_t g_application_storage[sizeof(app::Application)];
+// Raw storage for the pool object itself (constructed after BSS init).
+alignas(::pool::SizedPool<8192>)
+    uint8_t g_pool_storage[sizeof(::pool::SizedPool<8192>)];
 
 void FaultLedInit()
 {
@@ -21,7 +23,7 @@ void FaultLedBlinkForever()
   FaultLedInit();
   while (true)
   {
-    GPIOB->BSRR = 0x80000000;  // LED on (active low assumption may differ)
+    GPIOB->BSRR = 0x80000000;  // LED on (active low)
     for (volatile uint32_t d = 0; d < 100000; ++d)
     {
       __NOP();
@@ -66,7 +68,9 @@ void AppReset(void)
   SystemCoreClock = 16000000;
   __enable_irq();
 
-  auto* application = new (g_application_storage) app::Application();
+  // Bare-metal has no global ctor CRT: construct the pool explicitly.
+  auto* pool = new (g_pool_storage) ::pool::SizedPool<8192>();
+  ::pool::PoolPtr<app::Application> application(pool, pool);
   application->Run();
 }
 

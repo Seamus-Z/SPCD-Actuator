@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--drv", action="store_true")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--mem", action="store_true",
+                        help="pool watermark and module sizeof")
     parser.add_argument("--cmd", metavar="TEXT", help="raw tunnel command")
     parser.add_argument("--stream", metavar="CMD", help="repeat a command")
     parser.add_argument("--hz", type=float, default=2.0)
@@ -165,10 +167,13 @@ def main():
             print(client.command("drv").decode("ascii", errors="replace"))
         if args.status:
             print(client.command("status").decode("ascii", errors="replace"))
+        if args.mem:
+            print(client.command("mem").decode("ascii", errors="replace"))
         if args.cmd:
             print(client.command(args.cmd).decode("ascii", errors="replace"))
 
-        if not (args.list or args.drv or args.status or args.cmd or args.stream):
+        if not (args.list or args.drv or args.status or args.mem or args.cmd or
+                args.stream):
             print(client.command("drv").decode("ascii", errors="replace"))
     finally:
         bus.shutdown()

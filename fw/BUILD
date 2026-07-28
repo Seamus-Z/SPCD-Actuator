@@ -43,6 +43,7 @@ cc_binary(
     deps = [
         "//fw/HAL:hal",
         "//fw/device:drv8353s",
+        "//fw/pool:pool",
         "//fw/telemetry:telemetry",
         "//fw/bootloader:enter_bootloader",
         "//fw/bootloader:boot_headers",

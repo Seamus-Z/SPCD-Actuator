@@ -41,20 +41,25 @@ const char* StateName(State state)
 
 }  // namespace
 
-Application::Application()
-    : can_(board::CanOptions()),
-      gate_driver_(&timer_, board::GateDriverOptions()),
-      diagnostic_(&can_, kDefaultCanId, &registry_)
+Application::Application(::pool::Pool* pool)
+    : pool_(pool),
+      timer_(pool),
+      can_(pool, board::CanOptions()),
+      gate_driver_(pool, timer_.get(), board::GateDriverOptions()),
+      registry_(pool),
+      diagnostic_(pool, can_.get(), kDefaultCanId, registry_.get())
 {
   RegisterTelemetry();
 }
 
 void Application::RegisterTelemetry()
 {
-  registry_.Register(device::Drv8353s::kTelemetryChannel,
-                     &device::Drv8353s::TelemetryExport,
-                     &gate_driver_);
-  registry_.Register(kTelemetryChannel, &Application::TelemetryExport, this);
+  registry_->Register(device::Drv8353s::kTelemetryChannel,
+                      &device::Drv8353s::TelemetryExport,
+                      gate_driver_.get());
+  registry_->Register(kTelemetryChannel, &Application::TelemetryExport, this);
+  registry_->Register(kMemTelemetryChannel, &Application::MemTelemetryExport,
+                      this);
 }
 
 size_t Application::TelemetryExport(void* context, char* out, size_t out_capacity)
@@ -64,6 +69,17 @@ size_t Application::TelemetryExport(void* context, char* out, size_t out_capacit
     return 0;
   }
   return static_cast<Application*>(context)->FormatTelemetry(out, out_capacity);
+}
+
+size_t Application::MemTelemetryExport(void* context, char* out,
+                                       size_t out_capacity)
+{
+  if (context == nullptr)
+  {
+    return 0;
+  }
+  return static_cast<Application*>(context)->FormatMemTelemetry(out,
+                                                                out_capacity);
 }
 
 size_t Application::FormatTelemetry(char* out, size_t out_capacity) const
@@ -79,7 +95,42 @@ size_t Application::FormatTelemetry(char* out, size_t out_capacity) const
   pos = AppendStr(out, out_capacity, pos, "state=");
   pos = AppendStr(out, out_capacity, pos, StateName(state_));
   pos = AppendKeyUInt(out, out_capacity, pos, "driver_ok",
-                      gate_driver_.init_ok() ? 1u : 0u, true);
+                      gate_driver_->init_ok() ? 1u : 0u, true);
+  return pos;
+}
+
+size_t Application::FormatMemTelemetry(char* out, size_t out_capacity) const
+{
+  if (out == nullptr || out_capacity == 0 || pool_ == nullptr)
+  {
+    return 0;
+  }
+
+  using telemetry::text::AppendKeyUInt;
+  size_t pos = 0;
+  // Runtime pool watermark.
+  pos = AppendKeyUInt(out, out_capacity, pos, "pool",
+                      static_cast<unsigned>(pool_->size()), false);
+  pos = AppendKeyUInt(out, out_capacity, pos, "used",
+                      static_cast<unsigned>(pool_->used()), true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "avail",
+                      static_cast<unsigned>(pool_->available()), true);
+  // Compile-time module footprints (bytes).
+  pos = AppendKeyUInt(out, out_capacity, pos, "app",
+                      static_cast<unsigned>(sizeof(Application)), true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "timer",
+                      static_cast<unsigned>(sizeof(hal::MillisecondTimer)),
+                      true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "can",
+                      static_cast<unsigned>(sizeof(hal::FDCan)), true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "drv",
+                      static_cast<unsigned>(sizeof(device::Drv8353s)), true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "registry",
+                      static_cast<unsigned>(sizeof(telemetry::StatusRegistry)),
+                      true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "diag",
+                      static_cast<unsigned>(sizeof(telemetry::DiagnosticServer)),
+                      true);
   return pos;
 }
 
@@ -111,7 +162,7 @@ bool Application::Init()
   GPIOB->MODER = (GPIOB->MODER & ~GPIO_MODER_MODE15_Msk) |
                  (1 << GPIO_MODER_MODE15_Pos);
 
-  if (!gate_driver_.Init(board::GateDriverConfig()))
+  if (!gate_driver_->Init(board::GateDriverConfig()))
   {
     return false;
   }
@@ -122,10 +173,10 @@ bool Application::Init()
 
 void Application::RunOnce()
 {
-  const auto driver_status = gate_driver_.ReadStatus();
+  const auto driver_status = gate_driver_->ReadStatus();
   if (driver_status.fault || driver_status.fault_line)
   {
-    gate_driver_.Disable();
+    gate_driver_->Disable();
     state_ = State::DRIVER_FAULT;
     return;
   }
@@ -136,7 +187,7 @@ void Application::RunOnce()
 
 void Application::DriverFault()
 {
-  gate_driver_.PowerOff();
+  gate_driver_->PowerOff();
   PollCan();
 
   LedOn();
@@ -147,10 +198,10 @@ void Application::DriverFault()
 
 void Application::PollCan()
 {
-  const auto st = can_.status();
+  const auto st = can_->status();
   if (st.BusOff)
   {
-    can_.RecoverBusOff();
+    can_->RecoverBusOff();
     return;
   }
 
@@ -160,7 +211,7 @@ void Application::PollCan()
     FDCAN_RxHeaderTypeDef header = {};
     uint8_t data[64] = {};
     size_t len = 0;
-    if (!can_.Poll(&header, data, sizeof(data), &len))
+    if (!can_->Poll(&header, data, sizeof(data), &len))
     {
       break;
     }
@@ -176,15 +227,15 @@ void Application::PollCan()
       return;
     }
 
-    (void)diagnostic_.HandleFrame(header, data, len);
+    (void)diagnostic_->HandleFrame(header, data, len);
   }
 
-  diagnostic_.RunLine();
+  diagnostic_->RunLine();
 }
 
 void Application::EnterBootloaderMode()
 {
-  gate_driver_.Disable();
+  gate_driver_->Disable();
   for (int i = 0; i < 3; i++)
   {
     LedOn();
