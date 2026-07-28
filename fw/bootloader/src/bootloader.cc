@@ -52,6 +52,12 @@ bool IsBootloaderRequested()
   return *reinterpret_cast<uint32_t*>(kBootMagicAddr) == kBootMagicValue;
 }
 
+void ClearBootloaderRequest()
+{
+  *reinterpret_cast<volatile uint32_t*>(kBootMagicAddr) = 0;
+  __DSB();
+}
+
 }  // namespace
 
 enum class BootState : uint8_t
@@ -116,6 +122,9 @@ class BootOrchestrator
   {
     if (IsBootloaderRequested())
     {
+      // Consume the one-shot request. A later reset should boot the app
+      // unless it explicitly requests the bootloader again.
+      ClearBootloaderRequest();
       state_ = BootState::ENTER_SERVE;
       return;
     }

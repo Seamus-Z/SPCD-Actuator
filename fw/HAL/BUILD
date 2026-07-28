@@ -12,9 +12,12 @@ BAREMETAL_COPTS = [
 cc_library(
     name = "hal",
     srcs = ["fdcan.cc"],
-    hdrs = ["fdcan.h"],
+    hdrs = [
+        "fdcan.h",
+        "millisecond_timer.h",
+    ],
     include_prefix = "HAL",
     deps = ["@com_github_ARMmbed_mbed-g4//:mbed"],
     copts = BAREMETAL_COPTS,
-    visibility = ["//fw:__pkg__"],
+    visibility = ["//visibility:public"],
 )

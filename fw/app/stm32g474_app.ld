@@ -1,5 +1,7 @@
 /* Bare-metal application linker script for STM32G474
    App lives at 0x08010000 (after bootloader at 0x0800C000) */
+STACK_SIZE = 0x1000;
+
 MEMORY
 {
   APP_FLASH (rx) : ORIGIN = 0x08010000, LENGTH = 448K
@@ -44,7 +46,18 @@ SECTIONS
         __bss_end__ = .;
     } > RAM
 
+    .heap (COPY) : {
+        __end__ = .;
+        end = __end__;
+        *(.heap*)
+        . = ORIGIN(RAM) + LENGTH(RAM) - STACK_SIZE;
+        __HeapLimit = .;
+    } > RAM
+
     __StackTop = ORIGIN(RAM) + LENGTH(RAM);
+    __StackLimit = __StackTop - STACK_SIZE;
     _estack = __StackTop;
     PROVIDE(__stack = __StackTop);
+
+    ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed with stack")
 }
