@@ -65,6 +65,10 @@ class PhaseCurrentAdc
 
   Sample Read();
 
+  // Non-blocking: grab latest DR (for PWM-rate ISR after peak sample).
+  // Does not wait for EOS; use only when sync_on_ and OVRMOD overwrite is on.
+  Sample ReadLatest();
+
   bool init_ok() const { return init_ok_; }
   bool offset_ok() const { return offset_ok_; }
   bool sync_on() const { return sync_on_; }

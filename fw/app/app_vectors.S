@@ -25,7 +25,11 @@ g_app_vectors:
     .word 0                // 13: reserved
     .word AppDefault       // 14: PendSV
     .word AppDefault       // 15: SysTick
-    // IRQs 16-117: fill with AppDefault (STM32G474 has up to FMAC_IRQn=101)
-    .rept 102
+    // External IRQs: TIM5_IRQn = 50 (stm32g474xx.h)
+    .rept 50
+    .word AppDefault
+    .endr
+    .word TIM5_IRQHandler  // IRQ 50
+    .rept 51
     .word AppDefault
     .endr

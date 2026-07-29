@@ -155,7 +155,15 @@ size_t AppTelemetry::FormatCur(char* out, size_t out_capacity) const
     return 0;
   }
 
-  const auto s = current_adc_->Read();
+  // Prefer ISR-cached sample while control is running (avoid racing Read()).
+  const bool control_on =
+      application_ != nullptr &&
+      ((application_->voltage_foc() != nullptr &&
+        application_->voltage_foc()->active()) ||
+       (application_->current_loop() != nullptr &&
+        application_->current_loop()->active()));
+  const auto s =
+      control_on ? application_->last_current() : current_adc_->Read();
   using telemetry::text::AppendKeyUInt;
   size_t pos = 0;
   // err: 0=ok 1=BadConfig 2=EnableFail 3=SampleTimeout 4=OffsetOutOfRange
@@ -188,6 +196,28 @@ size_t AppTelemetry::FormatCur(char* out, size_t out_capacity) const
   pos = AppendKeyUInt(out, out_capacity, pos, "i1_mA_p100k", mA(s.i1_A), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "i2_mA_p100k", mA(s.i2_A), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "i3_mA_p100k", mA(s.i3_A), true);
+
+  // dq snapshot from Application (vfoc observe or current-loop).
+  // *_mA_p100k: milliamp + 100000 bias (100000 == 0 A).
+  if (application_ != nullptr)
+  {
+    pos = AppendKeyUInt(out, out_capacity, pos, "dq",
+                        application_->dq_valid() ? 1u : 0u, true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "id_mA_p100k",
+                        mA(application_->id_A()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "iq_mA_p100k",
+                        mA(application_->iq_A()), true);
+    const control::CurrentLoop* loop = application_->current_loop();
+    pos = AppendKeyUInt(out, out_capacity, pos, "iloop",
+                        (loop != nullptr && loop->active()) ? 1u : 0u, true);
+    if (loop != nullptr)
+    {
+      pos = AppendKeyUInt(out, out_capacity, pos, "idref_mA_p100k",
+                          mA(loop->id_ref_A()), true);
+      pos = AppendKeyUInt(out, out_capacity, pos, "iqref_mA_p100k",
+                          mA(loop->iq_ref_A()), true);
+    }
+  }
   return pos;
 }
 
@@ -209,12 +239,54 @@ size_t AppTelemetry::FormatPwm(char* out, size_t out_capacity) const
                       true);
   pos = AppendKeyUInt(out, out_capacity, pos, "trig",
                       phase_pwm_->adc_trigger_on() ? 1u : 0u, true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "cisr",
+                      phase_pwm_->control_isr_on() ? 1u : 0u, true);
   pos = AppendKeyUInt(out, out_capacity, pos, "hz", phase_pwm_->rate_hz(), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "arr",
                       static_cast<unsigned>(phase_pwm_->arr()), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "a", phase_pwm_->duty_a(), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "b", phase_pwm_->duty_b(), true);
   pos = AppendKeyUInt(out, out_capacity, pos, "c", phase_pwm_->duty_c(), true);
+
+  // Open-loop voltage FOC / current-loop snapshot (milli-units; signed via bias).
+  const control::VoltageFoc* foc =
+      (application_ != nullptr) ? application_->voltage_foc() : nullptr;
+  const control::CurrentLoop* loop =
+      (application_ != nullptr) ? application_->current_loop() : nullptr;
+  const bool foc_on = foc != nullptr && foc->active();
+  const bool loop_on = loop != nullptr && loop->active();
+  pos = AppendKeyUInt(out, out_capacity, pos, "foc", foc_on ? 1u : 0u, true);
+  pos = AppendKeyUInt(out, out_capacity, pos, "iloop", loop_on ? 1u : 0u, true);
+  const auto milli_biased = [](float x) -> unsigned {
+    const int v = static_cast<int>(x * 1000.0f) + 1000000;
+    return v < 0 ? 0u : static_cast<unsigned>(v);
+  };
+  if (foc_on)
+  {
+    pos = AppendKeyUInt(out, out_capacity, pos, "th_mrad_p1M",
+                        milli_biased(foc->theta_rad()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "v_mV_p1M",
+                        milli_biased(foc->voltage_V()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "w_mrad_s_p1M",
+                        milli_biased(foc->theta_rate_rad_s()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "bus_mV",
+                        static_cast<unsigned>(foc->bus_V() * 1000.0f + 0.5f),
+                        true);
+  }
+  else if (loop_on)
+  {
+    pos = AppendKeyUInt(out, out_capacity, pos, "th_mrad_p1M",
+                        milli_biased(loop->theta_rad()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "vd_mV_p1M",
+                        milli_biased(loop->vd_V()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "vq_mV_p1M",
+                        milli_biased(loop->vq_V()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "w_mrad_s_p1M",
+                        milli_biased(loop->theta_rate_rad_s()), true);
+    pos = AppendKeyUInt(out, out_capacity, pos, "bus_mV",
+                        static_cast<unsigned>(loop->bus_V() * 1000.0f + 0.5f),
+                        true);
+  }
   return pos;
 }
 

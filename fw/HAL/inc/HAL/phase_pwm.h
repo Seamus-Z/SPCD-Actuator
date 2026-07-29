@@ -8,6 +8,9 @@
 namespace hal
 {
 
+// Defined in phase_pwm.cc; vector table entry TIM5_IRQHandler calls this.
+void Tim5ControlIrq();
+
 class PhasePwm
 {
  public:
@@ -41,6 +44,14 @@ class PhasePwm
   void EnableAdcTrigger();
   void DisableAdcTrigger();
 
+  // Control ISR once per PWM period (valley UEV after peak ADC sample).
+  // |fn| runs from TIM5_IRQHandler — keep it short, no blocking waits.
+  using ControlIsrFn = void (*)(void* context);
+  void EnableControlIsr(ControlIsrFn fn, void* context);
+  void DisableControlIsr();
+  bool control_isr_on() const { return control_isr_on_; }
+  float period_s() const;
+
   bool init_ok() const { return init_ok_; }
   bool adc_trigger_on() const { return adc_trigger_on_; }
   uint16_t rate_hz() const { return options_.rate_hz; }
@@ -50,6 +61,8 @@ class PhasePwm
   uint16_t duty_c() const { return duty_c_; }
 
  private:
+  friend void Tim5ControlIrq();
+
   void ConfigureGpio();
   void ConfigureTimer();
   static uint16_t ClampDuty(uint16_t milli);
@@ -62,6 +75,7 @@ class PhasePwm
   uint16_t duty_c_ = 0;
   bool init_ok_ = false;
   bool adc_trigger_on_ = false;
+  bool control_isr_on_ = false;
 };
 
 }  // namespace hal

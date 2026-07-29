@@ -1,3 +1,16 @@
+# Header-only motor parameter tables (DM4310, ...).
+cc_library(
+    name = "motor",
+    hdrs = ["inc/device/motor.h"],
+    includes = ["inc"],
+    copts = [
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-std=c++17",
+    ],
+    visibility = ["//fw:__subpackages__"],
+)
+
 cc_library(
     name = "drv8353s",
     srcs = ["src/drv8353s.cc"],

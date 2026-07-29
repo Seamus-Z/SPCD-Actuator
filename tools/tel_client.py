@@ -147,6 +147,12 @@ def main():
                         help="PWM status (duty thousandths, hz, on)")
     parser.add_argument("--raw", nargs=3, type=int, metavar=("A", "B", "C"),
                         help="open-loop raw duty 0-1000 then sample cur")
+    parser.add_argument("--vfoc", nargs="+", metavar="ARG",
+                        help="open-loop voltage FOC: theta_rad V [rate_rad_s] "
+                             "(moteus d pwm); then sample pwm/cur")
+    parser.add_argument("--dq", nargs="+", metavar="ARG",
+                        help="current FOC (open-loop angle): id_A iq_A "
+                             "[rate_rad_s]; then sample pwm/cur")
     parser.add_argument("--stop", action="store_true",
                         help="PowerOff + duty 0")
     parser.add_argument("--cmd", metavar="TEXT", help="raw tunnel command")
@@ -191,11 +197,26 @@ def main():
                 "ascii", errors="replace"))
             print(client.command("pwm").decode("ascii", errors="replace"))
             print(client.command("cur").decode("ascii", errors="replace"))
+        if args.vfoc is not None:
+            if len(args.vfoc) < 2 or len(args.vfoc) > 3:
+                sys.exit("--vfoc needs theta_rad V [rate_rad_s]")
+            cmd = "vfoc " + " ".join(args.vfoc)
+            print(client.command(cmd).decode("ascii", errors="replace"))
+            print(client.command("pwm").decode("ascii", errors="replace"))
+            print(client.command("cur").decode("ascii", errors="replace"))
+        if args.dq is not None:
+            if len(args.dq) < 2 or len(args.dq) > 3:
+                sys.exit("--dq needs id_A iq_A [rate_rad_s]")
+            cmd = "dq " + " ".join(args.dq)
+            print(client.command(cmd).decode("ascii", errors="replace"))
+            print(client.command("pwm").decode("ascii", errors="replace"))
+            print(client.command("cur").decode("ascii", errors="replace"))
         if args.cmd:
             print(client.command(args.cmd).decode("ascii", errors="replace"))
 
         if not (args.list or args.drv or args.status or args.mem or args.cur or
                 args.pwm or args.stop or args.raw is not None or
+                args.vfoc is not None or args.dq is not None or
                 args.cmd or args.stream):
             print(client.command("drv").decode("ascii", errors="replace"))
     finally:

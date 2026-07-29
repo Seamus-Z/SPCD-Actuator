@@ -8,8 +8,8 @@
 namespace
 {
 // Raw storage for the pool object itself (constructed after BSS init).
-alignas(::pool::SizedPool<8192>)
-    uint8_t g_pool_storage[sizeof(::pool::SizedPool<8192>)];
+alignas(::pool::SizedPool<12288>)
+    uint8_t g_pool_storage[sizeof(::pool::SizedPool<12288>)];
 
 void FaultLedInit()
 {
@@ -76,7 +76,7 @@ void AppReset(void)
   __enable_irq();
 
   // Bare-metal has no global ctor CRT: construct the pool explicitly.
-  auto* pool = new (g_pool_storage) ::pool::SizedPool<8192>();
+  auto* pool = new (g_pool_storage) ::pool::SizedPool<12288>();
   ::pool::PoolPtr<app::Application> application(pool, pool);
   application->Run();
 }

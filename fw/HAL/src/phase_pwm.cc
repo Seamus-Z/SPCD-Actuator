@@ -18,7 +18,31 @@ void SetAfPp(GPIO_TypeDef* port, unsigned pin, unsigned af)
   *afr = (*afr & ~(0xFu << shift)) | ((af & 0xFu) << shift);
 }
 
+PhasePwm::ControlIsrFn g_control_isr_fn = nullptr;
+void* g_control_isr_ctx = nullptr;
+
 }  // namespace
+
+void Tim5ControlIrq()
+{
+  if ((TIM5->SR & TIM_SR_UIF) == 0)
+  {
+    return;
+  }
+  TIM5->SR = ~TIM_SR_UIF;
+
+  // Center-aligned: UEV at peak (DIR=1) and valley (DIR=0). Run once per
+  // PWM period at valley so peak-triggered ADC has finished into DR.
+  if ((TIM5->CR1 & TIM_CR1_DIR) != 0)
+  {
+    return;
+  }
+
+  if (g_control_isr_fn != nullptr)
+  {
+    g_control_isr_fn(g_control_isr_ctx);
+  }
+}
 
 PhasePwm::PhasePwm(const Options& options) : options_(options) {}
 
@@ -26,6 +50,7 @@ bool PhasePwm::Init()
 {
   init_ok_ = false;
   adc_trigger_on_ = false;
+  control_isr_on_ = false;
   if (options_.rate_hz == 0)
   {
     return false;
@@ -60,7 +85,7 @@ void PhasePwm::ConfigureTimer()
   }
 
   TIM5->CR1 = 0;
-  TIM5->DIER = 0;  // CC4DE enabled later via EnableAdcTrigger()
+  TIM5->DIER = 0;  // CC4DE / UIE enabled later
   TIM5->PSC = 0;
   TIM5->ARR = arr_;
 
@@ -134,4 +159,39 @@ void PhasePwm::DisableAdcTrigger()
   adc_trigger_on_ = false;
 }
 
+float PhasePwm::period_s() const
+{
+  if (options_.rate_hz == 0)
+  {
+    return 0.0f;
+  }
+  return 1.0f / static_cast<float>(options_.rate_hz);
+}
+
+void PhasePwm::EnableControlIsr(ControlIsrFn fn, void* context)
+{
+  g_control_isr_fn = fn;
+  g_control_isr_ctx = context;
+  TIM5->SR = ~TIM_SR_UIF;
+  TIM5->DIER |= TIM_DIER_UIE;
+  NVIC_SetPriority(TIM5_IRQn, 2);
+  NVIC_EnableIRQ(TIM5_IRQn);
+  control_isr_on_ = true;
+}
+
+void PhasePwm::DisableControlIsr()
+{
+  NVIC_DisableIRQ(TIM5_IRQn);
+  TIM5->DIER &= ~TIM_DIER_UIE;
+  TIM5->SR = ~TIM_SR_UIF;
+  g_control_isr_fn = nullptr;
+  g_control_isr_ctx = nullptr;
+  control_isr_on_ = false;
+}
+
 }  // namespace hal
+
+extern "C" void TIM5_IRQHandler(void)
+{
+  ::hal::Tim5ControlIrq();
+}

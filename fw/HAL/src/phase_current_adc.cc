@@ -199,6 +199,33 @@ PhaseCurrentAdc::Sample PhaseCurrentAdc::Read()
   return sample;
 }
 
+PhaseCurrentAdc::Sample PhaseCurrentAdc::ReadLatest()
+{
+  Sample sample;
+  if (!init_ok_ || !sync_on_)
+  {
+    return sample;
+  }
+
+  // Family-3 remap: logical i1←ADC3, i2←ADC2, i3←ADC1 (same as synced path).
+  const uint16_t adc1 = static_cast<uint16_t>(ADC1->DR);
+  const uint16_t adc2 = static_cast<uint16_t>(ADC2->DR);
+  const uint16_t adc3 = static_cast<uint16_t>(ADC3->DR);
+  sample.raw1 = adc3;
+  sample.raw2 = adc2;
+  sample.raw3 = adc1;
+  sample.i1_A =
+      (static_cast<int>(sample.raw1) - static_cast<int>(offset1_)) * scale_;
+  sample.i2_A =
+      (static_cast<int>(sample.raw2) - static_cast<int>(offset2_)) * scale_;
+  sample.i3_A =
+      (static_cast<int>(sample.raw3) - static_cast<int>(offset3_)) * scale_;
+  sample.ok = true;
+  // Do not bump seq_ here: ISR runs at 15 kHz and huge seq digits blow the
+  // telemetry line past the response buffer (host then never sees '\n').
+  return sample;
+}
+
 void PhaseCurrentAdc::ConfigureGpioAnalog()
 {
   __HAL_RCC_GPIOA_CLK_ENABLE();

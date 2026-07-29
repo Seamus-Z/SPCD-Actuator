@@ -5,6 +5,7 @@
 #include "BL_Config.h"
 #include "board_config.h"
 #include "bootloader.h"
+#include "math/foc.h"
 #include "stm32g4xx.h"
 
 namespace app
@@ -50,6 +51,60 @@ bool ParseU16(std::string_view text, uint16_t* out)
   return true;
 }
 
+// Simple decimal float parser (optional sign + fraction). No exponent.
+bool ParseF32(std::string_view text, float* out)
+{
+  if (out == nullptr || text.empty())
+  {
+    return false;
+  }
+
+  size_t i = 0;
+  float sign = 1.0f;
+  if (text[i] == '-')
+  {
+    sign = -1.0f;
+    ++i;
+  }
+  else if (text[i] == '+')
+  {
+    ++i;
+  }
+  if (i >= text.size())
+  {
+    return false;
+  }
+
+  float value = 0.0f;
+  bool saw_digit = false;
+  while (i < text.size() && text[i] >= '0' && text[i] <= '9')
+  {
+    saw_digit = true;
+    value = value * 10.0f + static_cast<float>(text[i] - '0');
+    ++i;
+  }
+
+  if (i < text.size() && text[i] == '.')
+  {
+    ++i;
+    float place = 0.1f;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9')
+    {
+      saw_digit = true;
+      value += static_cast<float>(text[i] - '0') * place;
+      place *= 0.1f;
+      ++i;
+    }
+  }
+
+  if (!saw_digit || i != text.size())
+  {
+    return false;
+  }
+  *out = sign * value;
+  return true;
+}
+
 }  // namespace
 
 Application::Application(::pool::Pool* pool)
@@ -59,6 +114,8 @@ Application::Application(::pool::Pool* pool)
       gate_driver_(pool, timer_.get(), board::GateDriverOptions()),
       current_adc_(pool, timer_.get(), board::CurrentSenseOptions()),
       phase_pwm_(pool, board::PhasePwmOptions()),
+      voltage_foc_(pool, board::VoltageFocOptions()),
+      current_loop_(pool, board::CurrentLoopOptions()),
       registry_(pool),
       diagnostic_(pool, can_.get(), kDefaultCanId, registry_.get()),
       telemetry_(registry_.get(), &state_, gate_driver_.get(),
@@ -111,7 +168,7 @@ bool Application::Init()
     return false;
   }
 
-  // PWM after offset cal; leave HiZ + duty=0 until "raw".
+  // PWM after offset cal; leave HiZ + duty=0 until "raw" / "vfoc" / "dq".
   if (!phase_pwm_->Init())
   {
     return false;
@@ -158,6 +215,18 @@ void Application::StopOutput()
 {
   if (phase_pwm_.get() != nullptr)
   {
+    phase_pwm_->DisableControlIsr();
+  }
+  if (voltage_foc_.get() != nullptr)
+  {
+    voltage_foc_->Stop();
+  }
+  if (current_loop_.get() != nullptr)
+  {
+    current_loop_->Stop();
+  }
+  if (phase_pwm_.get() != nullptr)
+  {
     phase_pwm_->Stop();
   }
   if (gate_driver_.get() != nullptr)
@@ -165,6 +234,82 @@ void Application::StopOutput()
     gate_driver_->PowerOff();
   }
   pwm_output_on_ = false;
+  dq_valid_ = false;
+}
+
+void Application::StartControlIsr()
+{
+  if (phase_pwm_.get() == nullptr || !phase_pwm_->init_ok())
+  {
+    return;
+  }
+  phase_pwm_->EnableControlIsr(&Application::ControlIsrThunk, this);
+}
+
+void Application::ControlIsrThunk(void* context)
+{
+  if (context == nullptr)
+  {
+    return;
+  }
+  static_cast<Application*>(context)->ControlIsrStep();
+}
+
+void Application::ObserveDqFromSample(float theta_rad,
+                                      const hal::PhaseCurrentAdc::Sample& s)
+{
+  if (!s.ok)
+  {
+    dq_valid_ = false;
+    return;
+  }
+  const math::SinCos sc = math::SinCosFromRadians(theta_rad);
+  const math::DqTransform dq(sc, s.i1_A, s.i2_A, s.i3_A);
+  id_A_ = dq.d;
+  iq_A_ = dq.q;
+  dq_valid_ = true;
+}
+
+void Application::ControlIsrStep()
+{
+  const bool vfoc_on = voltage_foc_.get() != nullptr && voltage_foc_->active();
+  const bool dq_on = current_loop_.get() != nullptr && current_loop_->active();
+  if ((!vfoc_on && !dq_on) || phase_pwm_.get() == nullptr ||
+      current_adc_.get() == nullptr)
+  {
+    return;
+  }
+
+  const float dt_s = phase_pwm_->period_s();
+  const auto sample = current_adc_->ReadLatest();
+  last_current_ = sample;
+
+  if (dq_on)
+  {
+    control::CurrentLoop::Duties duties;
+    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+                             &duties))
+    {
+      return;
+    }
+    id_A_ = current_loop_->id_A();
+    iq_A_ = current_loop_->iq_A();
+    dq_valid_ = sample.ok;
+    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    gate_driver_->PowerOn();
+    pwm_output_on_ = true;
+    return;
+  }
+
+  control::VoltageFoc::Duties duties;
+  if (!voltage_foc_->Step(dt_s, &duties))
+  {
+    return;
+  }
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  ObserveDqFromSample(voltage_foc_->theta_rad(), sample);
 }
 
 void Application::PollCan()
@@ -238,6 +383,14 @@ bool Application::HandleDiagCommand(std::string_view verb,
   {
     return HandleRawCommand(tokenizer, writer);
   }
+  if (verb == "vfoc")
+  {
+    return HandleVfocCommand(tokenizer, writer);
+  }
+  if (verb == "dq")
+  {
+    return HandleDqCommand(tokenizer, writer);
+  }
   if (verb == "stop")
   {
     StopOutput();
@@ -277,11 +430,136 @@ bool Application::HandleRawCommand(mjlib::base::Tokenizer& tokenizer,
     return true;
   }
 
-  // moteus order: write CCR first, then release HiZ.
+  voltage_foc_->Stop();
+  current_loop_->Stop();
+  phase_pwm_->DisableControlIsr();
+  dq_valid_ = false;
+
   phase_pwm_->SetDuty(a, b, c);
   gate_driver_->PowerOn();
   pwm_output_on_ = true;
   writer.write("OK raw\r\n");
+  return true;
+}
+
+bool Application::HandleVfocCommand(mjlib::base::Tokenizer& tokenizer,
+                                    mjlib::base::BufferWriteStream& writer)
+{
+  if (state_ != State::RUN)
+  {
+    writer.write("ERR not in RUN\r\n");
+    return true;
+  }
+  if (!phase_pwm_->init_ok())
+  {
+    writer.write("ERR pwm not ready\r\n");
+    return true;
+  }
+
+  float theta = 0.0f;
+  float voltage = 0.0f;
+  if (!ParseF32(tokenizer.next(), &theta) ||
+      !ParseF32(tokenizer.next(), &voltage))
+  {
+    writer.write("ERR usage: vfoc theta_rad V [rate_rad_s]\r\n");
+    return true;
+  }
+
+  float rate = 0.0f;
+  const auto rate_tok = tokenizer.next();
+  if (!rate_tok.empty() && !ParseF32(rate_tok, &rate))
+  {
+    writer.write("ERR bad rate\r\n");
+    return true;
+  }
+
+  current_loop_->Stop();
+  phase_pwm_->DisableControlIsr();
+
+  control::VoltageFoc::Command cmd;
+  cmd.theta_rad = theta;
+  cmd.voltage_V = voltage;
+  cmd.theta_rate_rad_s = rate;
+  voltage_foc_->Start(cmd);
+
+  // Seed first duties then let PWM-rate ISR continue.
+  control::VoltageFoc::Duties duties;
+  if (!voltage_foc_->Step(0.0f, &duties))
+  {
+    writer.write("ERR foc step\r\n");
+    voltage_foc_->Stop();
+    return true;
+  }
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  last_current_ = current_adc_->ReadLatest();
+  ObserveDqFromSample(voltage_foc_->theta_rad(), last_current_);
+  StartControlIsr();
+
+  writer.write("OK vfoc\r\n");
+  return true;
+}
+
+bool Application::HandleDqCommand(mjlib::base::Tokenizer& tokenizer,
+                                  mjlib::base::BufferWriteStream& writer)
+{
+  if (state_ != State::RUN)
+  {
+    writer.write("ERR not in RUN\r\n");
+    return true;
+  }
+  if (!phase_pwm_->init_ok())
+  {
+    writer.write("ERR pwm not ready\r\n");
+    return true;
+  }
+
+  // dq <id_A> <iq_A> [theta_rate_rad_s]  (θ starts at 0)
+  float id = 0.0f;
+  float iq = 0.0f;
+  if (!ParseF32(tokenizer.next(), &id) || !ParseF32(tokenizer.next(), &iq))
+  {
+    writer.write("ERR usage: dq id_A iq_A [rate_rad_s]\r\n");
+    return true;
+  }
+
+  float rate = 0.0f;
+  const auto rate_tok = tokenizer.next();
+  if (!rate_tok.empty() && !ParseF32(rate_tok, &rate))
+  {
+    writer.write("ERR bad rate\r\n");
+    return true;
+  }
+
+  voltage_foc_->Stop();
+  phase_pwm_->DisableControlIsr();
+
+  control::CurrentLoop::Command cmd;
+  cmd.theta_rad = 0.0f;
+  cmd.id_A = id;
+  cmd.iq_A = iq;
+  cmd.theta_rate_rad_s = rate;
+  current_loop_->Start(cmd);
+
+  last_current_ = current_adc_->ReadLatest();
+  control::CurrentLoop::Duties duties;
+  if (!current_loop_->Step(0.0f, last_current_.i1_A, last_current_.i2_A,
+                           last_current_.i3_A, &duties))
+  {
+    writer.write("ERR dq step\r\n");
+    current_loop_->Stop();
+    return true;
+  }
+  id_A_ = current_loop_->id_A();
+  iq_A_ = current_loop_->iq_A();
+  dq_valid_ = last_current_.ok;
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  StartControlIsr();
+
+  writer.write("OK dq\r\n");
   return true;
 }
 

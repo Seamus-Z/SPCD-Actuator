@@ -41,7 +41,8 @@ class DiagnosticServer
   template <typename T>
   struct Buffer
   {
-    T data[256] = {};
+    // Must fit "cur " + format_body_ + "\r\n" (was 256 → cur timed out).
+    T data[512] = {};
     size_t pos = 0;
 
     std::string_view view() const
@@ -74,7 +75,7 @@ class DiagnosticServer
 
   // Kept off the MSP stack: HandleCommand previously used ~240B locals.
   char channel_name_[32] = {};
-  char format_body_[192] = {};
+  char format_body_[448] = {};
   char list_buf_[128] = {};
 };
 

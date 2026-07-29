@@ -4,7 +4,10 @@
 #include "HAL/fdcan.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
+#include "control/current_loop.h"
+#include "control/voltage_foc.h"
 #include "device/drv8353s.h"
+#include "device/motor.h"
 
 namespace app
 {
@@ -76,6 +79,42 @@ inline hal::PhasePwm::Options PhasePwmOptions()
   options.pwm2 = PA_1_ALT0;
   options.pwm3 = PA_2_ALT0;
   options.rate_hz = 15000;
+  return options;
+}
+
+// Active motor parameter table (DM4310 by default).
+inline const device::motor::Params& MotorParams()
+{
+  return device::motor::kActive;
+}
+
+// Nominal DC bus for open-loop voltage→PWM scaling (no bus ADC yet).
+inline constexpr float kBusVoltage_V = 48.0f;
+
+inline control::VoltageFoc::Options VoltageFocOptions()
+{
+  control::VoltageFoc::Options options;
+  options.bus_V = kBusVoltage_V;
+  options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
+  options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
+  return options;
+}
+
+inline control::CurrentLoop::Options CurrentLoopOptions()
+{
+  const auto& motor = MotorParams();
+  control::CurrentLoop::Options options;
+  options.bus_V = kBusVoltage_V;
+  options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
+  options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
+  options.kp_d = motor.id_kp;
+  options.kp_q = motor.iq_kp;
+  // Vendor I-gains are per PWM cycle @ ~15–20 kHz → continuous 1/s.
+  constexpr float kPwmHz = 15000.0f;
+  options.ki_d = motor.id_ki * kPwmHz;
+  options.ki_q = motor.iq_ki * kPwmHz;
+  // Soft cap for main-loop bring-up (motor max is higher).
+  options.max_current_A = 2.0f;
   return options;
 }
 

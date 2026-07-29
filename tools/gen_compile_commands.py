@@ -35,6 +35,8 @@ INCLUDES = [
     "-Ifw",
     "-Ifw/HAL/inc",
     "-Ifw/device/inc",
+    "-Ifw/control/inc",
+    "-Ifw/math/inc",
     "-Ifw/telemetry/inc",
     "-Ifw/pool/inc",
     "-Ifw/app",
