@@ -10,8 +10,10 @@ CompileFlags:
     - -DTARGET_STM
     - -DTARGET_STM32G4
     - -DTARGET_STM32G474xE
+    - -DTARGET_NUCLEO_G474RE
     - -DSTM32G4
     - -Ifw
+    - -Ifw/app
     - -Ifw/bootloader/inc
     - -Ifw/HAL
     - -Ithird_party/mbed-g4
@@ -19,11 +21,15 @@ CompileFlags:
     - -Ithird_party/mbed-g4/cmsis/TARGET_CORTEX_M
     - -Ithird_party/mbed-g4/hal
     - -Ithird_party/mbed-g4/platform
+    - -Ithird_party/mbed-g4/drivers
     - -Ithird_party/mbed-g4/targets/TARGET_STM
     - -Ithird_party/mbed-g4/targets/TARGET_STM/device
     - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4
     - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/device
     - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE
     - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE/device
+    # PinNames.h (PC_13, PB_0, ...) lives under the Nucleo board package.
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE/TARGET_NUCLEO_G474RE
+    - -Ithird_party/mbed-g4/targets/TARGET_STM/TARGET_STM32G4/TARGET_STM32G474xE/TARGET_NUCLEO_G474RE/device
 Index:
   Background: Build

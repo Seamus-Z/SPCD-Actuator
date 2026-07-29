@@ -6,7 +6,6 @@
 #include "board_config.h"
 #include "bootloader.h"
 #include "stm32g4xx.h"
-#include "telemetry/text_format.h"
 
 namespace app
 {
@@ -27,18 +26,6 @@ void DelayNops(uint32_t count)
   }
 }
 
-const char* StateName(State state)
-{
-  switch (state)
-  {
-    case State::INIT: return "INIT";
-    case State::RUN: return "RUN";
-    case State::DRIVER_FAULT: return "DRIVER_FAULT";
-    case State::ENTER_BOOTLOADER: return "ENTER_BOOTLOADER";
-  }
-  return "?";
-}
-
 }  // namespace
 
 Application::Application(::pool::Pool* pool)
@@ -47,91 +34,10 @@ Application::Application(::pool::Pool* pool)
       can_(pool, board::CanOptions()),
       gate_driver_(pool, timer_.get(), board::GateDriverOptions()),
       registry_(pool),
-      diagnostic_(pool, can_.get(), kDefaultCanId, registry_.get())
+      diagnostic_(pool, can_.get(), kDefaultCanId, registry_.get()),
+      telemetry_(registry_.get(), &state_, gate_driver_.get(), pool)
 {
-  RegisterTelemetry();
-}
-
-void Application::RegisterTelemetry()
-{
-  registry_->Register(device::Drv8353s::kTelemetryChannel,
-                      &device::Drv8353s::TelemetryExport,
-                      gate_driver_.get());
-  registry_->Register(kTelemetryChannel, &Application::TelemetryExport, this);
-  registry_->Register(kMemTelemetryChannel, &Application::MemTelemetryExport,
-                      this);
-}
-
-size_t Application::TelemetryExport(void* context, char* out, size_t out_capacity)
-{
-  if (context == nullptr)
-  {
-    return 0;
-  }
-  return static_cast<Application*>(context)->FormatTelemetry(out, out_capacity);
-}
-
-size_t Application::MemTelemetryExport(void* context, char* out,
-                                       size_t out_capacity)
-{
-  if (context == nullptr)
-  {
-    return 0;
-  }
-  return static_cast<Application*>(context)->FormatMemTelemetry(out,
-                                                                out_capacity);
-}
-
-size_t Application::FormatTelemetry(char* out, size_t out_capacity) const
-{
-  if (out == nullptr || out_capacity == 0)
-  {
-    return 0;
-  }
-
-  using telemetry::text::AppendKeyUInt;
-  using telemetry::text::AppendStr;
-  size_t pos = 0;
-  pos = AppendStr(out, out_capacity, pos, "state=");
-  pos = AppendStr(out, out_capacity, pos, StateName(state_));
-  pos = AppendKeyUInt(out, out_capacity, pos, "driver_ok",
-                      gate_driver_->init_ok() ? 1u : 0u, true);
-  return pos;
-}
-
-size_t Application::FormatMemTelemetry(char* out, size_t out_capacity) const
-{
-  if (out == nullptr || out_capacity == 0 || pool_ == nullptr)
-  {
-    return 0;
-  }
-
-  using telemetry::text::AppendKeyUInt;
-  size_t pos = 0;
-  // Runtime pool watermark.
-  pos = AppendKeyUInt(out, out_capacity, pos, "pool",
-                      static_cast<unsigned>(pool_->size()), false);
-  pos = AppendKeyUInt(out, out_capacity, pos, "used",
-                      static_cast<unsigned>(pool_->used()), true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "avail",
-                      static_cast<unsigned>(pool_->available()), true);
-  // Compile-time module footprints (bytes).
-  pos = AppendKeyUInt(out, out_capacity, pos, "app",
-                      static_cast<unsigned>(sizeof(Application)), true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "timer",
-                      static_cast<unsigned>(sizeof(hal::MillisecondTimer)),
-                      true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "can",
-                      static_cast<unsigned>(sizeof(hal::FDCan)), true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "drv",
-                      static_cast<unsigned>(sizeof(device::Drv8353s)), true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "registry",
-                      static_cast<unsigned>(sizeof(telemetry::StatusRegistry)),
-                      true);
-  pos = AppendKeyUInt(out, out_capacity, pos, "diag",
-                      static_cast<unsigned>(sizeof(telemetry::DiagnosticServer)),
-                      true);
-  return pos;
+  telemetry_.Register();
 }
 
 void Application::Run()
