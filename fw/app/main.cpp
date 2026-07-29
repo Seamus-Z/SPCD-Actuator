@@ -66,6 +66,13 @@ void AppReset(void)
 
   SCB->VTOR = 0x08010000;
   SystemCoreClock = 16000000;
+
+  // Enable CP10/CP11 before any float code (PhaseCurrentAdc ctor uses VFP).
+  // Without this, softfp VFP ops HardFault and CAN boot entry is dead.
+  SCB->CPACR |= (0xFu << 20);
+  __DSB();
+  __ISB();
+
   __enable_irq();
 
   // Bare-metal has no global ctor CRT: construct the pool explicitly.

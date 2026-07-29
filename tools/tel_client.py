@@ -139,6 +139,16 @@ def main():
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--mem", action="store_true",
                         help="pool watermark and module sizeof")
+    parser.add_argument("--cur", action="store_true",
+                        help="phase current ADC (err: 0 ok, 1 BadConfig, "
+                             "2 EnableFail, 3 SampleTimeout, 4 OffsetOutOfRange, "
+                             "5 SyncFail; sync=1 means PWM-peak sampling)")
+    parser.add_argument("--pwm", action="store_true",
+                        help="PWM status (duty thousandths, hz, on)")
+    parser.add_argument("--raw", nargs=3, type=int, metavar=("A", "B", "C"),
+                        help="open-loop raw duty 0-1000 then sample cur")
+    parser.add_argument("--stop", action="store_true",
+                        help="PowerOff + duty 0")
     parser.add_argument("--cmd", metavar="TEXT", help="raw tunnel command")
     parser.add_argument("--stream", metavar="CMD", help="repeat a command")
     parser.add_argument("--hz", type=float, default=2.0)
@@ -169,11 +179,24 @@ def main():
             print(client.command("status").decode("ascii", errors="replace"))
         if args.mem:
             print(client.command("mem").decode("ascii", errors="replace"))
+        if args.cur:
+            print(client.command("cur").decode("ascii", errors="replace"))
+        if args.pwm:
+            print(client.command("pwm").decode("ascii", errors="replace"))
+        if args.stop:
+            print(client.command("stop").decode("ascii", errors="replace"))
+        if args.raw is not None:
+            a, b, c = args.raw
+            print(client.command(f"raw {a} {b} {c}").decode(
+                "ascii", errors="replace"))
+            print(client.command("pwm").decode("ascii", errors="replace"))
+            print(client.command("cur").decode("ascii", errors="replace"))
         if args.cmd:
             print(client.command(args.cmd).decode("ascii", errors="replace"))
 
-        if not (args.list or args.drv or args.status or args.mem or args.cmd or
-                args.stream):
+        if not (args.list or args.drv or args.status or args.mem or args.cur or
+                args.pwm or args.stop or args.raw is not None or
+                args.cmd or args.stream):
             print(client.command("drv").decode("ascii", errors="replace"))
     finally:
         bus.shutdown()

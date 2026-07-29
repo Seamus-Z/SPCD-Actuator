@@ -1,6 +1,8 @@
 cc_library(
     name = "text_format",
-    hdrs = ["text_format.h"],
+    hdrs = ["inc/text_format.h"],
+    includes = ["inc"],
+    strip_include_prefix = "inc",
     include_prefix = "telemetry",
     copts = [
         "-mcpu=cortex-m4",
@@ -12,12 +14,14 @@ cc_library(
 
 cc_library(
     name = "telemetry",
-    srcs = ["diagnostic_server.cc"],
+    srcs = ["src/diagnostic_server.cc"],
     hdrs = [
-        "diagnostic_server.h",
-        "status_registry.h",
-        "text_format.h",
+        "inc/diagnostic_server.h",
+        "inc/status_registry.h",
+        "inc/text_format.h",
     ],
+    includes = ["inc"],
+    strip_include_prefix = "inc",
     include_prefix = "telemetry",
     deps = [
         ":text_format",

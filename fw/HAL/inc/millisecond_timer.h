@@ -3,6 +3,17 @@
 #pragma once
 
 #include "stm32g4xx_hal.h"
+
+// moteus-x1 uses TIM5 for motor PWM; relocate the us ticker to TIM15
+// (same override as moteus WORKSPACE MBED_US_TIMER_*).
+#ifndef MBED_US_TIMER_TIM
+#define MBED_US_TIMER_TIM TIM15
+#define MBED_US_TIMER_USCORE_TIM _TIM15
+#define MBED_US_TIMER_TIM_USCORE TIM15_
+#define TIM_MST_IRQ TIM1_BRK_TIM15_IRQn
+#define TIM_MST_BIT_WIDTH 16
+#endif
+
 #include "us_ticker_data.h"
 
 namespace hal

@@ -7,7 +7,7 @@
 
 #include "HAL/fdcan.h"
 #include "boot_mjlib.h"
-#include "status_registry.h"
+#include "telemetry/status_registry.h"
 
 namespace telemetry
 {
@@ -15,7 +15,19 @@ namespace telemetry
 class DiagnosticServer
 {
  public:
+  // Return true if the verb was handled (response already written).
+  using AppCommandHandler =
+      bool (*)(void* context, std::string_view verb,
+               mjlib::base::Tokenizer& tokenizer,
+               mjlib::base::BufferWriteStream& writer);
+
   DiagnosticServer(hal::FDCan* can, uint8_t can_id, StatusRegistry* registry);
+
+  void SetAppCommandHandler(AppCommandHandler handler, void* context)
+  {
+    app_handler_ = handler;
+    app_context_ = context;
+  }
 
   // Handle one RX frame. Returns true if it was a multiplex frame for us.
   bool HandleFrame(const FDCAN_RxHeaderTypeDef& header,
@@ -53,6 +65,8 @@ class DiagnosticServer
   hal::FDCan* can_ = nullptr;
   uint8_t can_id_ = 1;
   StatusRegistry* registry_ = nullptr;
+  AppCommandHandler app_handler_ = nullptr;
+  void* app_context_ = nullptr;
 
   Buffer<char> command_;
   Buffer<char> response_;

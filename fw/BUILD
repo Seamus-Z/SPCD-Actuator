@@ -30,17 +30,17 @@ genrule(
 )
 
 # === Application ===
-# main.cpp holds the Application state machine + CRT entry.
+# main.cpp stays at fw/app/; other app sources live under app/src + app/inc.
 cc_binary(
     name = "app.elf",
     srcs = [
         "app/main.cpp",
-        "app/application.cc",
-        "app/application.h",
-        "app/app_state.h",
-        "app/app_telemetry.cc",
-        "app/app_telemetry.h",
-        "app/board_config.h",
+        "app/src/application.cc",
+        "app/src/app_telemetry.cc",
+        "app/inc/application.h",
+        "app/inc/app_state.h",
+        "app/inc/app_telemetry.h",
+        "app/inc/board_config.h",
         "app/app_vectors.S",
     ],
     deps = [
@@ -55,6 +55,7 @@ cc_binary(
     includes = [
         ".",
         "app",
+        "app/inc",
     ],
     copts = BAREMETAL_COPTS + ["-std=c++17"],
     linkopts = BAREMETAL_LINKOPTS + ["-T$(location app/stm32g474_app.ld)"],

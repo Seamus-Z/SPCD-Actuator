@@ -1,4 +1,4 @@
-#include "diagnostic_server.h"
+#include "telemetry/diagnostic_server.h"
 
 #include <algorithm>
 #include <cstring>
@@ -259,6 +259,13 @@ void DiagnosticServer::HandleCommand(std::string_view verb,
     return;
   }
 
+  // Application-owned verbs (raw / stop / ...).
+  if (app_handler_ != nullptr &&
+      app_handler_(app_context_, verb, tokenizer, writer))
+  {
+    return;
+  }
+
   channel_name_[0] = '\0';
   if (verb == "get")
   {
@@ -275,6 +282,10 @@ void DiagnosticServer::HandleCommand(std::string_view verb,
     CopyName(channel_name_, sizeof(channel_name_), "status");
   } else if (verb == "mem") {
     CopyName(channel_name_, sizeof(channel_name_), "mem");
+  } else if (verb == "cur") {
+    CopyName(channel_name_, sizeof(channel_name_), "cur");
+  } else if (verb == "pwm") {
+    CopyName(channel_name_, sizeof(channel_name_), "pwm");
   } else {
     writer.write("ERR unknown command\r\n");
     return;

@@ -2,6 +2,8 @@
 #pragma once
 
 #include "HAL/fdcan.h"
+#include "HAL/phase_current_adc.h"
+#include "HAL/phase_pwm.h"
 #include "device/drv8353s.h"
 
 namespace app
@@ -51,6 +53,30 @@ inline device::Drv8353s::Config GateDriverConfig()
   config.vds_threshold_mv = 700;
   config.csa_gain = 20;
   return config;
+}
+
+// Phase current sense (moteus-x1 / family 3).
+inline hal::PhaseCurrentAdc::Options CurrentSenseOptions()
+{
+  hal::PhaseCurrentAdc::Options options;
+  options.current1 = PA_3;   // ADC1_IN4 / FCUR1
+  options.current2 = PA_6;   // ADC2_IN3 / FCUR2
+  options.current3 = PB_1;   // ADC3_IN1 / FCUR3
+  options.sense_ohm = 0.0005f;
+  options.csa_gain = 20.0f;
+  options.sample_time_code = 1;  // 6.5 cycles
+  return options;
+}
+
+// Phase PWM (moteus-x1 / family 3): TIM5 @ 15 kHz center-aligned.
+inline hal::PhasePwm::Options PhasePwmOptions()
+{
+  hal::PhasePwm::Options options;
+  options.pwm1 = PA_0_ALT0;
+  options.pwm2 = PA_1_ALT0;
+  options.pwm3 = PA_2_ALT0;
+  options.rate_hz = 15000;
+  return options;
 }
 
 }  // namespace board
