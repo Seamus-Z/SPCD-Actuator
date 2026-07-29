@@ -1,10 +1,8 @@
 cc_library(
     name = "drv8353s",
     srcs = ["src/drv8353s.cc"],
-    hdrs = ["inc/drv8353s.h"],
+    hdrs = ["inc/device/drv8353s.h"],
     includes = ["inc"],
-    strip_include_prefix = "inc",
-    include_prefix = "device",
     deps = [
         "//fw/HAL:hal",
         "//fw/telemetry:text_format",

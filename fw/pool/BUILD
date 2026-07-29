@@ -1,9 +1,7 @@
 cc_library(
     name = "pool",
-    hdrs = ["inc/pool.h"],
+    hdrs = ["inc/pool/pool.h"],
     includes = ["inc"],
-    strip_include_prefix = "inc",
-    include_prefix = "pool",
     copts = [
         "-mcpu=cortex-m4",
         "-mthumb",

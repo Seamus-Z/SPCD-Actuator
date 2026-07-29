@@ -13,7 +13,10 @@ CompileFlags:
     - -DTARGET_NUCLEO_G474RE
     - -DSTM32G4
     - -Ifw
-    - -Ifw/include
+    - -Ifw/HAL/inc
+    - -Ifw/device/inc
+    - -Ifw/telemetry/inc
+    - -Ifw/pool/inc
     - -Ifw/app
     - -Ifw/app/inc
     - -Ifw/bootloader/inc
