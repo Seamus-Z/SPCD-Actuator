@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate compile_commands.json for clangd.
+"""Regenerate compile_commands.json for clangd (IDE only — not used by Bazel).
+
+Uses arm-none-eabi-g++ as the compile-database driver so clangd can extract
+the embedded libstdc++/newlib include paths via --query-driver. This does not
+change the firmware build toolchain.
 
 Headers live at fw/<pkg>/inc/<pkg>/foo.h so #include \"<pkg>/foo.h\"
 works with -Ifw/<pkg>/inc (same as Bazel includes=[\"inc\"]).
@@ -11,9 +15,13 @@ Usage:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Prefer PATH; fall back to the common Debian/Ubuntu location.
+COMPILER = shutil.which("arm-none-eabi-g++") or "/usr/bin/arm-none-eabi-g++"
 
 SOURCES = [
     "fw/HAL/src/fdcan.cc",
@@ -21,7 +29,9 @@ SOURCES = [
     "fw/HAL/src/phase_pwm.cc",
     "fw/app/main.cpp",
     "fw/app/src/application.cc",
+    "fw/app/src/binary_commands.cc",
     "fw/app/src/app_telemetry.cc",
+    "fw/telemetry/src/binary_link.cc",
     "fw/device/src/drv8353s.cc",
     "fw/telemetry/src/diagnostic_server.cc",
     "fw/bootloader/src/BL_CanDriver.cc",
@@ -35,7 +45,9 @@ INCLUDES = [
     "-Ifw",
     "-Ifw/HAL/inc",
     "-Ifw/device/inc",
+    "-Ifw/foc_ctrl/inc",
     "-Ifw/control/inc",
+    "-Ifw/protocol/inc",
     "-Ifw/math/inc",
     "-Ifw/telemetry/inc",
     "-Ifw/pool/inc",
@@ -70,12 +82,16 @@ DEFINES = [
 
 
 def main() -> None:
+    # Do not pass --target=... here: arm-none-eabi-g++ rejects clang's -target,
+    # which breaks clangd's --query-driver include extraction.
     db = [
         {
             "directory": str(ROOT),
             "file": rel,
             "arguments": [
-                "clang++",
+                COMPILER,
+                "-mcpu=cortex-m4",
+                "-mthumb",
                 "-c",
                 rel,
                 "-std=c++17",
@@ -91,6 +107,7 @@ def main() -> None:
     out = ROOT / "compile_commands.json"
     out.write_text(json.dumps(db, indent=2) + "\n")
     print(f"wrote {out.relative_to(ROOT)} ({len(db)} entries)")
+    print(f"IDE driver: {COMPILER}")
 
 
 if __name__ == "__main__":

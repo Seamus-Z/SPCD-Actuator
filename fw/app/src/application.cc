@@ -15,6 +15,8 @@ namespace
 
 constexpr uint32_t kBootRequestId = 0x7E;
 constexpr char kBootRequestPayload[] = "BOOT";
+// Live telemetry ~500 Hz (snapshot dump uses the bus when active).
+constexpr uint32_t kTelemPeriodUs = 2000;
 
 void LedOn() { GPIOB->BSRR = 0x80000000; }
 void LedOff() { GPIOB->BSRR = 0x00008000; }
@@ -27,82 +29,9 @@ void DelayNops(uint32_t count)
   }
 }
 
-// Parse decimal uint16; returns false on empty/non-digit/overflow.
-bool ParseU16(std::string_view text, uint16_t* out)
+int32_t AmpsToMilli(float a)
 {
-  if (out == nullptr || text.empty())
-  {
-    return false;
-  }
-  unsigned value = 0;
-  for (char c : text)
-  {
-    if (c < '0' || c > '9')
-    {
-      return false;
-    }
-    value = value * 10u + static_cast<unsigned>(c - '0');
-    if (value > 65535u)
-    {
-      return false;
-    }
-  }
-  *out = static_cast<uint16_t>(value);
-  return true;
-}
-
-// Simple decimal float parser (optional sign + fraction). No exponent.
-bool ParseF32(std::string_view text, float* out)
-{
-  if (out == nullptr || text.empty())
-  {
-    return false;
-  }
-
-  size_t i = 0;
-  float sign = 1.0f;
-  if (text[i] == '-')
-  {
-    sign = -1.0f;
-    ++i;
-  }
-  else if (text[i] == '+')
-  {
-    ++i;
-  }
-  if (i >= text.size())
-  {
-    return false;
-  }
-
-  float value = 0.0f;
-  bool saw_digit = false;
-  while (i < text.size() && text[i] >= '0' && text[i] <= '9')
-  {
-    saw_digit = true;
-    value = value * 10.0f + static_cast<float>(text[i] - '0');
-    ++i;
-  }
-
-  if (i < text.size() && text[i] == '.')
-  {
-    ++i;
-    float place = 0.1f;
-    while (i < text.size() && text[i] >= '0' && text[i] <= '9')
-    {
-      saw_digit = true;
-      value += static_cast<float>(text[i] - '0') * place;
-      place *= 0.1f;
-      ++i;
-    }
-  }
-
-  if (!saw_digit || i != text.size())
-  {
-    return false;
-  }
-  *out = sign * value;
-  return true;
+  return static_cast<int32_t>(a * 1000.0f);
 }
 
 }  // namespace
@@ -116,13 +45,10 @@ Application::Application(::pool::Pool* pool)
       phase_pwm_(pool, board::PhasePwmOptions()),
       voltage_foc_(pool, board::VoltageFocOptions()),
       current_loop_(pool, board::CurrentLoopOptions()),
-      registry_(pool),
-      diagnostic_(pool, can_.get(), kDefaultCanId, registry_.get()),
-      telemetry_(registry_.get(), &state_, gate_driver_.get(),
-                 current_adc_.get(), phase_pwm_.get(), this, pool)
+      binary_link_(pool, can_.get(), kDefaultCanId),
+      commands_(this)
 {
-  diagnostic_->SetAppCommandHandler(&Application::DiagCommandThunk, this);
-  telemetry_.Register();
+  binary_link_->SetCommandHandler(&BinaryCommands::Thunk, &commands_);
 }
 
 void Application::Run()
@@ -157,8 +83,6 @@ bool Application::Init()
   {
     return false;
   }
-
-  // Current ADC after CSA is configured/calibrated on the DRV.
   if (!current_adc_->Init())
   {
     return false;
@@ -167,20 +91,17 @@ bool Application::Init()
   {
     return false;
   }
-
-  // PWM after offset cal; leave HiZ + duty=0 until "raw" / "vfoc" / "dq".
   if (!phase_pwm_->Init())
   {
     return false;
   }
-
-  // Arm TIM5 CC4→DMA→LPTIM1→ADC, then enable CC4 DMA requests.
   if (!current_adc_->StartPwmSync())
   {
     return false;
   }
   phase_pwm_->EnableAdcTrigger();
 
+  telem_last_us_ = timer_->read_us();
   LedOn();
   return true;
 }
@@ -197,6 +118,8 @@ void Application::RunOnce()
   }
 
   PollCan();
+  MaybeSendSnapshot();
+  MaybeSendTelemetry();
   LedOn();
 }
 
@@ -204,7 +127,6 @@ void Application::DriverFault()
 {
   StopOutput();
   PollCan();
-
   LedOn();
   DelayNops(50000);
   LedOff();
@@ -235,6 +157,7 @@ void Application::StopOutput()
   }
   pwm_output_on_ = false;
   dq_valid_ = false;
+  mode_ = telemetry::xt_can::kModeStop;
 }
 
 void Application::StartControlIsr()
@@ -286,7 +209,7 @@ void Application::ControlIsrStep()
 
   if (dq_on)
   {
-    control::CurrentLoop::Duties duties;
+    foc_ctrl::CurrentLoop::Duties duties;
     if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties))
     {
@@ -298,18 +221,23 @@ void Application::ControlIsrStep()
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
-    return;
+  }
+  else
+  {
+    foc_ctrl::VoltageFoc::Duties duties;
+    if (!voltage_foc_->Step(dt_s, &duties))
+    {
+      return;
+    }
+    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    gate_driver_->PowerOn();
+    pwm_output_on_ = true;
+    ObserveDqFromSample(voltage_foc_->theta_rad(), sample);
   }
 
-  control::VoltageFoc::Duties duties;
-  if (!voltage_foc_->Step(dt_s, &duties))
-  {
-    return;
-  }
-  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
-  gate_driver_->PowerOn();
-  pwm_output_on_ = true;
-  ObserveDqFromSample(voltage_foc_->theta_rad(), sample);
+  // PWM-rate snapshot fill (Id/Iq + phase currents).
+  const uint32_t dt_us = static_cast<uint32_t>(dt_s * 1.0e6f + 0.5f);
+  snapshot_.PushIsr(id_A_, iq_A_, sample.i1_A, sample.i2_A, sample.i3_A, dt_us);
 }
 
 void Application::PollCan()
@@ -321,7 +249,6 @@ void Application::PollCan()
     return;
   }
 
-  // Drain the RX FIFO: BOOT request or multiplex telemetry tunnel.
   for (int i = 0; i < 8; ++i)
   {
     FDCAN_RxHeaderTypeDef header = {};
@@ -343,10 +270,126 @@ void Application::PollCan()
       return;
     }
 
-    (void)diagnostic_->HandleFrame(header, data, len);
+    (void)binary_link_->HandleFrame(header, data, len);
+  }
+}
+
+telemetry::xt_can::Telemetry Application::BuildTelemetry() const
+{
+  telemetry::xt_can::Telemetry t{};
+  t.flags = 0;
+  if (pwm_output_on_)
+  {
+    t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagPwmOn);
+  }
+  if (phase_pwm_.get() != nullptr && phase_pwm_->control_isr_on())
+  {
+    t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagCisr);
+  }
+  if (dq_valid_)
+  {
+    t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagDqValid);
+  }
+  if (state_ == State::DRIVER_FAULT)
+  {
+    t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagFault);
   }
 
-  diagnostic_->RunLine();
+  t.id_mA = AmpsToMilli(id_A_);
+  t.iq_mA = AmpsToMilli(iq_A_);
+  t.i1_mA = AmpsToMilli(last_current_.i1_A);
+  t.i2_mA = AmpsToMilli(last_current_.i2_A);
+  t.i3_mA = AmpsToMilli(last_current_.i3_A);
+
+  if (current_loop_.get() != nullptr && current_loop_->active())
+  {
+    t.idref_mA = AmpsToMilli(current_loop_->id_ref_A());
+    t.iqref_mA = AmpsToMilli(current_loop_->iq_ref_A());
+    t.theta_mrad = static_cast<int32_t>(current_loop_->theta_rad() * 1000.0f);
+    t.omega_mrad_s =
+        static_cast<int32_t>(current_loop_->theta_rate_rad_s() * 1000.0f);
+    t.vd_mV = static_cast<int32_t>(current_loop_->vd_V() * 1000.0f);
+    t.vq_mV = static_cast<int32_t>(current_loop_->vq_V() * 1000.0f);
+    t.bus_mV = static_cast<uint16_t>(current_loop_->bus_V() * 1000.0f + 0.5f);
+  }
+  else if (voltage_foc_.get() != nullptr && voltage_foc_->active())
+  {
+    t.theta_mrad = static_cast<int32_t>(voltage_foc_->theta_rad() * 1000.0f);
+    t.omega_mrad_s =
+        static_cast<int32_t>(voltage_foc_->theta_rate_rad_s() * 1000.0f);
+    t.vd_mV = static_cast<int32_t>(voltage_foc_->voltage_V() * 1000.0f);
+    t.vq_mV = 0;
+    t.bus_mV = static_cast<uint16_t>(voltage_foc_->bus_V() * 1000.0f + 0.5f);
+  }
+  else
+  {
+    t.bus_mV = static_cast<uint16_t>(board::kBusVoltage_V * 1000.0f + 0.5f);
+  }
+
+  if (phase_pwm_.get() != nullptr)
+  {
+    t.duty_a = phase_pwm_->duty_a();
+    t.duty_b = phase_pwm_->duty_b();
+    t.duty_c = phase_pwm_->duty_c();
+  }
+  t.mode = mode_;
+  return t;
+}
+
+void Application::MaybeSendTelemetry()
+{
+  if (binary_link_.get() == nullptr || timer_.get() == nullptr)
+  {
+    return;
+  }
+  // Pause live telem while snapshot occupies the TX path.
+  if (snapshot_.busy())
+  {
+    return;
+  }
+  const auto now = timer_->read_us();
+  const auto elapsed =
+      static_cast<uint32_t>(hal::MillisecondTimer::subtract_us(now, telem_last_us_));
+  if (elapsed < kTelemPeriodUs)
+  {
+    return;
+  }
+  telem_last_us_ = now;
+  binary_link_->SendTelemetry(BuildTelemetry());
+}
+
+void Application::MaybeSendSnapshot()
+{
+  if (binary_link_.get() == nullptr)
+  {
+    return;
+  }
+  if (snapshot_.state() == SnapshotCapture::State::Ready)
+  {
+    telemetry::xt_can::SnapMeta meta{};
+    snapshot_.FillMeta(&meta, snap_seq_);
+    binary_link_->SendSnapMeta(meta);
+    snap_meta_sent_ = true;
+    snapshot_.BeginSend();
+  }
+
+  if (snapshot_.state() != SnapshotCapture::State::Sending)
+  {
+    return;
+  }
+
+  // Burst a few FD frames per main-loop iteration.
+  for (int i = 0; i < 4; ++i)
+  {
+    telemetry::xt_can::SnapData frame{};
+    if (!snapshot_.FillDataFrame(&frame, snap_seq_))
+    {
+      snapshot_.Finish();
+      snap_meta_sent_ = false;
+      break;
+    }
+    binary_link_->SendSnapData(frame);
+  }
 }
 
 void Application::EnterBootloaderMode()
@@ -361,206 +404,6 @@ void Application::EnterBootloaderMode()
     DelayNops(200000);
   }
   EnterBootloader();
-}
-
-bool Application::DiagCommandThunk(void* context, std::string_view verb,
-                                   mjlib::base::Tokenizer& tokenizer,
-                                   mjlib::base::BufferWriteStream& writer)
-{
-  if (context == nullptr)
-  {
-    return false;
-  }
-  return static_cast<Application*>(context)->HandleDiagCommand(verb, tokenizer,
-                                                               writer);
-}
-
-bool Application::HandleDiagCommand(std::string_view verb,
-                                    mjlib::base::Tokenizer& tokenizer,
-                                    mjlib::base::BufferWriteStream& writer)
-{
-  if (verb == "raw")
-  {
-    return HandleRawCommand(tokenizer, writer);
-  }
-  if (verb == "vfoc")
-  {
-    return HandleVfocCommand(tokenizer, writer);
-  }
-  if (verb == "dq")
-  {
-    return HandleDqCommand(tokenizer, writer);
-  }
-  if (verb == "stop")
-  {
-    StopOutput();
-    writer.write("OK stop\r\n");
-    return true;
-  }
-  return false;
-}
-
-bool Application::HandleRawCommand(mjlib::base::Tokenizer& tokenizer,
-                                   mjlib::base::BufferWriteStream& writer)
-{
-  if (state_ != State::RUN)
-  {
-    writer.write("ERR not in RUN\r\n");
-    return true;
-  }
-  if (!phase_pwm_->init_ok())
-  {
-    writer.write("ERR pwm not ready\r\n");
-    return true;
-  }
-
-  uint16_t a = 0;
-  uint16_t b = 0;
-  uint16_t c = 0;
-  if (!ParseU16(tokenizer.next(), &a) || !ParseU16(tokenizer.next(), &b) ||
-      !ParseU16(tokenizer.next(), &c))
-  {
-    writer.write("ERR usage: raw a b c (0-1000 milli)\r\n");
-    return true;
-  }
-  if (a > hal::PhasePwm::kDutyMax || b > hal::PhasePwm::kDutyMax ||
-      c > hal::PhasePwm::kDutyMax)
-  {
-    writer.write("ERR duty > 1000\r\n");
-    return true;
-  }
-
-  voltage_foc_->Stop();
-  current_loop_->Stop();
-  phase_pwm_->DisableControlIsr();
-  dq_valid_ = false;
-
-  phase_pwm_->SetDuty(a, b, c);
-  gate_driver_->PowerOn();
-  pwm_output_on_ = true;
-  writer.write("OK raw\r\n");
-  return true;
-}
-
-bool Application::HandleVfocCommand(mjlib::base::Tokenizer& tokenizer,
-                                    mjlib::base::BufferWriteStream& writer)
-{
-  if (state_ != State::RUN)
-  {
-    writer.write("ERR not in RUN\r\n");
-    return true;
-  }
-  if (!phase_pwm_->init_ok())
-  {
-    writer.write("ERR pwm not ready\r\n");
-    return true;
-  }
-
-  float theta = 0.0f;
-  float voltage = 0.0f;
-  if (!ParseF32(tokenizer.next(), &theta) ||
-      !ParseF32(tokenizer.next(), &voltage))
-  {
-    writer.write("ERR usage: vfoc theta_rad V [rate_rad_s]\r\n");
-    return true;
-  }
-
-  float rate = 0.0f;
-  const auto rate_tok = tokenizer.next();
-  if (!rate_tok.empty() && !ParseF32(rate_tok, &rate))
-  {
-    writer.write("ERR bad rate\r\n");
-    return true;
-  }
-
-  current_loop_->Stop();
-  phase_pwm_->DisableControlIsr();
-
-  control::VoltageFoc::Command cmd;
-  cmd.theta_rad = theta;
-  cmd.voltage_V = voltage;
-  cmd.theta_rate_rad_s = rate;
-  voltage_foc_->Start(cmd);
-
-  // Seed first duties then let PWM-rate ISR continue.
-  control::VoltageFoc::Duties duties;
-  if (!voltage_foc_->Step(0.0f, &duties))
-  {
-    writer.write("ERR foc step\r\n");
-    voltage_foc_->Stop();
-    return true;
-  }
-  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
-  gate_driver_->PowerOn();
-  pwm_output_on_ = true;
-  last_current_ = current_adc_->ReadLatest();
-  ObserveDqFromSample(voltage_foc_->theta_rad(), last_current_);
-  StartControlIsr();
-
-  writer.write("OK vfoc\r\n");
-  return true;
-}
-
-bool Application::HandleDqCommand(mjlib::base::Tokenizer& tokenizer,
-                                  mjlib::base::BufferWriteStream& writer)
-{
-  if (state_ != State::RUN)
-  {
-    writer.write("ERR not in RUN\r\n");
-    return true;
-  }
-  if (!phase_pwm_->init_ok())
-  {
-    writer.write("ERR pwm not ready\r\n");
-    return true;
-  }
-
-  // dq <id_A> <iq_A> [theta_rate_rad_s]  (θ starts at 0)
-  float id = 0.0f;
-  float iq = 0.0f;
-  if (!ParseF32(tokenizer.next(), &id) || !ParseF32(tokenizer.next(), &iq))
-  {
-    writer.write("ERR usage: dq id_A iq_A [rate_rad_s]\r\n");
-    return true;
-  }
-
-  float rate = 0.0f;
-  const auto rate_tok = tokenizer.next();
-  if (!rate_tok.empty() && !ParseF32(rate_tok, &rate))
-  {
-    writer.write("ERR bad rate\r\n");
-    return true;
-  }
-
-  voltage_foc_->Stop();
-  phase_pwm_->DisableControlIsr();
-
-  control::CurrentLoop::Command cmd;
-  cmd.theta_rad = 0.0f;
-  cmd.id_A = id;
-  cmd.iq_A = iq;
-  cmd.theta_rate_rad_s = rate;
-  current_loop_->Start(cmd);
-
-  last_current_ = current_adc_->ReadLatest();
-  control::CurrentLoop::Duties duties;
-  if (!current_loop_->Step(0.0f, last_current_.i1_A, last_current_.i2_A,
-                           last_current_.i3_A, &duties))
-  {
-    writer.write("ERR dq step\r\n");
-    current_loop_->Stop();
-    return true;
-  }
-  id_A_ = current_loop_->id_A();
-  iq_A_ = current_loop_->iq_A();
-  dq_valid_ = last_current_.ok;
-  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
-  gate_driver_->PowerOn();
-  pwm_output_on_ = true;
-  StartControlIsr();
-
-  writer.write("OK dq\r\n");
-  return true;
 }
 
 }  // namespace app

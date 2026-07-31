@@ -1,4 +1,6 @@
 # Use compile_commands.json when present; also keep Add flags as fallback.
+# compile_commands.json is IDE-only (arm-none-eabi-g++ driver for clangd);
+# Bazel build toolchain is unchanged.
 # Headers live under third_party/mbed-g4 (symlink) so they are NOT under
 # gitignored /bazel-* (clangd skips gitignored paths for go-to-definition).
 CompileFlags:
@@ -15,6 +17,9 @@ CompileFlags:
     - -Ifw
     - -Ifw/HAL/inc
     - -Ifw/device/inc
+    - -Ifw/foc_ctrl/inc
+    - -Ifw/control/inc
+    - -Ifw/protocol/inc
     - -Ifw/math/inc
     - -Ifw/telemetry/inc
     - -Ifw/pool/inc

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xtellar host</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header>
+    <div class="headerRow">
+      <div>
+        <h1>xtellar</h1>
+        <p>二进制 CAN-FD · Live 监控 / Snapshot 示波器</p>
+      </div>
+      <nav class="modeBar" id="modeBar">
+        <button type="button" class="modeBtn active" data-mode="live">Live</button>
+        <button type="button" class="modeBtn" data-mode="snap">Snapshot</button>
+      </nav>
+    </div>
+  </header>
+  <main>
+    <section class="panel side">
+      <h2>CAN Port</h2>
+      <label>Scan list (SocketCAN)</label>
+      <select id="portSelect"></select>
+      <label>Or type name</label>
+      <input id="portCustom" type="text" placeholder="can0" list="portHints" />
+      <datalist id="portHints"></datalist>
+      <div class="row">
+        <button class="ghost" id="btnScan" type="button">扫描</button>
+        <button id="btnConnect" type="button">打开 CAN</button>
+        <button class="stop" id="btnDisconnect" type="button">关闭 CAN</button>
+      </div>
+      <div class="status" id="portStatus">not connected</div>
+      <div class="status" id="motorStatus">电机未探测</div>
+      <pre class="infoBox" id="motorInfo"></pre>
+
+      <h2 style="margin-top:1.2rem">Command</h2>
+      <label>Id (A)</label>
+      <input id="idA" type="number" step="0.1" value="0" />
+      <label>Iq (A)</label>
+      <input id="iqA" type="number" step="0.1" value="0.5" />
+      <label>ω elec (rad/s)</label>
+      <input id="omega" type="number" step="1" value="50" />
+      <div class="row">
+        <button id="btnDq" type="button">Start dq</button>
+        <button class="stop" id="btnStop" type="button">Stop</button>
+      </div>
+      <label style="margin-top:1rem">Vfoc V</label>
+      <input id="vfocV" type="number" step="0.1" value="0.8" />
+      <div class="row">
+        <button class="ghost" id="btnVfoc" type="button">Start vfoc</button>
+      </div>
+      <div class="status" id="status">idle</div>
+    </section>
+
+    <section class="workspace">
+      <section class="panel plot-panel" id="panelLive">
+        <div class="plot-head">
+          <h2>Live scope</h2>
+          <div class="row tight">
+            <button class="ghost" id="btnZoomIn" type="button" title="Y zoom in">Y+</button>
+            <button class="ghost" id="btnZoomOut" type="button" title="Y zoom out">Y−</button>
+            <button class="ghost" id="btnTimeIn" type="button" title="Time zoom in">T+</button>
+            <button class="ghost" id="btnTimeOut" type="button" title="Time zoom out">T−</button>
+            <button class="ghost" id="btnAuto" type="button">Autoscale</button>
+            <button class="ghost" id="btnClearPlot" type="button">Clear</button>
+            <label class="inlineChk"><input type="checkbox" id="chkPause" /> Pause</label>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">Id / ref</div><div class="v" id="sId">—</div></div>
+          <div class="stat"><div class="k">Iq / ref</div><div class="v" id="sIq">—</div></div>
+          <div class="stat"><div class="k">mode / cisr</div><div class="v" id="sMode">—</div></div>
+        </div>
+        <div class="scope-body">
+          <aside class="telem-side">
+            <input id="chSearch" type="search" placeholder="搜索遥测…" />
+            <div class="tree" id="telemTree"></div>
+            <div class="sigStats" id="sigStats">
+              <div class="sigStatsTitle">Signal quality</div>
+              <div class="sigStatsBody" id="sigStatsBody">选中通道查看均值 / 噪声</div>
+            </div>
+          </aside>
+          <div class="canvas-wrap">
+            <canvas id="plot" width="1000" height="360"></canvas>
+            <div class="hint">滚轮缩放 Y · Shift+滚轮缩放时间 · 拖拽平移 · 双击自动量程</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel plot-panel" id="panelSnap" hidden>
+        <div class="plot-head">
+          <h2>Snapshot scope</h2>
+          <div class="row tight">
+            <label class="inlineChk">N <input id="snapN" type="number" min="32" max="512" step="32" value="512" style="width:4.5rem" /></label>
+            <label class="inlineChk">dec <input id="snapDec" type="number" min="1" max="16" value="1" style="width:3rem" /></label>
+            <button id="btnSnap" type="button">Capture</button>
+            <button class="ghost" id="btnSnapAuto" type="button">Autoscale</button>
+          </div>
+        </div>
+        <div class="status" id="snapStatus">先 Start dq/vfoc，再 Capture（PWM 率采样）</div>
+        <div class="scope-body">
+          <aside class="telem-side">
+            <div class="tree" id="snapTree"></div>
+            <div class="sigStats">
+              <div class="sigStatsTitle">Capture info</div>
+              <div class="sigStatsBody" id="snapInfo">尚无快照</div>
+            </div>
+          </aside>
+          <div class="canvas-wrap">
+            <canvas id="snapPlot" width="1000" height="360"></canvas>
+            <div class="hint">默认 15 kHz × 512 点 · 通道 Id/Iq/I1/I2/I3</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="plot-head">
+          <h2>Messages</h2>
+          <div class="row tight">
+            <label class="inlineChk"><input type="checkbox" id="chkLogTelem" checked /> Telem</label>
+            <label class="inlineChk"><input type="checkbox" id="chkLogFollow" checked /> Follow</label>
+            <button class="ghost" id="btnClearLog" type="button">Clear</button>
+          </div>
+        </div>
+        <div class="msgLog" id="msgLog"></div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

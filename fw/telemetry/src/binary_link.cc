@@ -1,0 +1,124 @@
+#include "telemetry/binary_link.h"
+
+#include <cstring>
+#include <string_view>
+
+namespace telemetry
+{
+
+BinaryLink::BinaryLink(hal::FDCan* can, uint8_t node_id)
+    : can_(can), node_id_(node_id)
+{
+}
+
+void BinaryLink::SetCommandHandler(CommandHandler handler, void* context)
+{
+  handler_ = handler;
+  context_ = context;
+}
+
+bool BinaryLink::SendRaw(uint16_t can_id, const void* data, size_t len)
+{
+  if (can_ == nullptr || data == nullptr || len == 0 || len > 64)
+  {
+    return false;
+  }
+  hal::FDCan::SendOptions opts;
+  opts.extended_id = hal::FDCan::Override::DISABLE;
+  opts.fdcan_frame = hal::FDCan::Override::REQUIRE;
+  opts.bitrate_switch = hal::FDCan::Override::REQUIRE;
+  return can_->Send(can_id, std::string_view(static_cast<const char*>(data), len),
+                    opts);
+}
+
+void BinaryLink::SendAck(uint8_t cmd, uint8_t seq, uint8_t status)
+{
+  xt_can::Ack ack{};
+  ack.hdr.magic = xt_can::kMagic;
+  ack.hdr.ver = xt_can::kVersion;
+  ack.hdr.type = xt_can::kTypeAck;
+  ack.hdr.seq = seq;
+  ack.cmd = cmd;
+  ack.status = status;
+  ack.reserved = 0;
+  (void)SendRaw(tel_id(), &ack, sizeof(ack));
+}
+
+void BinaryLink::SendTelemetry(const xt_can::Telemetry& telem)
+{
+  xt_can::Telemetry out = telem;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeTel;
+  out.hdr.seq = tel_seq_++;
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
+void BinaryLink::SendInfo(const xt_can::Info& info)
+{
+  xt_can::Info out = info;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeInfo;
+  // seq filled by caller (matches command seq)
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
+void BinaryLink::SendSnapMeta(const xt_can::SnapMeta& meta)
+{
+  xt_can::SnapMeta out = meta;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeSnapMeta;
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
+void BinaryLink::SendSnapData(const xt_can::SnapData& data)
+{
+  xt_can::SnapData out = data;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeSnapData;
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
+bool BinaryLink::HandleFrame(const FDCAN_RxHeaderTypeDef& header,
+                             const uint8_t* data, size_t len)
+{
+  if (data == nullptr || can_ == nullptr)
+  {
+    return false;
+  }
+  if (header.IdType != FDCAN_STANDARD_ID ||
+      header.Identifier != cmd_id() ||
+      header.RxFrameType != FDCAN_DATA_FRAME)
+  {
+    return false;
+  }
+  if (len < sizeof(xt_can::Header) + 1)
+  {
+    return false;
+  }
+
+  xt_can::Header hdr;
+  std::memcpy(&hdr, data, sizeof(hdr));
+  if (hdr.magic != xt_can::kMagic || hdr.ver != xt_can::kVersion ||
+      hdr.type != xt_can::kTypeCmd)
+  {
+    return false;
+  }
+
+  const uint8_t cmd = data[sizeof(xt_can::Header)];
+  const uint8_t* payload = data + sizeof(xt_can::Header) + 1;
+  const size_t payload_len = len - sizeof(xt_can::Header) - 1;
+
+  uint8_t status = xt_can::kStatusBadCmd;
+  if (handler_ != nullptr)
+  {
+    status = handler_(context_, cmd, hdr.seq, payload, payload_len);
+  }
+  SendAck(cmd, hdr.seq, status);
+  return true;
+}
+
+}  // namespace telemetry

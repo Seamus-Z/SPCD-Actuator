@@ -61,6 +61,7 @@ inline constexpr Params kDm4310 = {
 
 // Active motor on this board (change when swapping motors).
 inline constexpr const Params& kActive = kDm4310;
+inline constexpr const char kActiveName[] = "DM4310";
 
 // θ̇_elec [rad/s] from mechanical speed [rad/s].
 inline float ElectricalOmegaFromMechanical(float omega_mech_rad_s,

@@ -4,8 +4,8 @@
 #include "HAL/fdcan.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
-#include "control/current_loop.h"
-#include "control/voltage_foc.h"
+#include "foc_ctrl/current_loop.h"
+#include "foc_ctrl/voltage_foc.h"
 #include "device/drv8353s.h"
 #include "device/motor.h"
 
@@ -91,19 +91,19 @@ inline const device::motor::Params& MotorParams()
 // Nominal DC bus for open-loop voltage→PWM scaling (no bus ADC yet).
 inline constexpr float kBusVoltage_V = 48.0f;
 
-inline control::VoltageFoc::Options VoltageFocOptions()
+inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
 {
-  control::VoltageFoc::Options options;
+  foc_ctrl::VoltageFoc::Options options;
   options.bus_V = kBusVoltage_V;
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
   return options;
 }
 
-inline control::CurrentLoop::Options CurrentLoopOptions()
+inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
 {
   const auto& motor = MotorParams();
-  control::CurrentLoop::Options options;
+  foc_ctrl::CurrentLoop::Options options;
   options.bus_V = kBusVoltage_V;
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
@@ -113,8 +113,8 @@ inline control::CurrentLoop::Options CurrentLoopOptions()
   constexpr float kPwmHz = 15000.0f;
   options.ki_d = motor.id_ki * kPwmHz;
   options.ki_q = motor.iq_ki * kPwmHz;
-  // Soft cap for main-loop bring-up (motor max is higher).
-  options.max_current_A = 2.0f;
+  // Soft command clamp = motor peak (DM4310 table).
+  options.max_current_A = motor.max_phase_current_A;
   return options;
 }
 

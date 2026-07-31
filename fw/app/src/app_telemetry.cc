@@ -207,7 +207,7 @@ size_t AppTelemetry::FormatCur(char* out, size_t out_capacity) const
                         mA(application_->id_A()), true);
     pos = AppendKeyUInt(out, out_capacity, pos, "iq_mA_p100k",
                         mA(application_->iq_A()), true);
-    const control::CurrentLoop* loop = application_->current_loop();
+    const foc_ctrl::CurrentLoop* loop = application_->current_loop();
     pos = AppendKeyUInt(out, out_capacity, pos, "iloop",
                         (loop != nullptr && loop->active()) ? 1u : 0u, true);
     if (loop != nullptr)
@@ -249,9 +249,9 @@ size_t AppTelemetry::FormatPwm(char* out, size_t out_capacity) const
   pos = AppendKeyUInt(out, out_capacity, pos, "c", phase_pwm_->duty_c(), true);
 
   // Open-loop voltage FOC / current-loop snapshot (milli-units; signed via bias).
-  const control::VoltageFoc* foc =
+  const foc_ctrl::VoltageFoc* foc =
       (application_ != nullptr) ? application_->voltage_foc() : nullptr;
-  const control::CurrentLoop* loop =
+  const foc_ctrl::CurrentLoop* loop =
       (application_ != nullptr) ? application_->current_loop() : nullptr;
   const bool foc_on = foc != nullptr && foc->active();
   const bool loop_on = loop != nullptr && loop->active();
