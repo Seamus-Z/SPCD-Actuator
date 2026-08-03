@@ -54,6 +54,16 @@ void BinaryLink::SendTelemetry(const xt_can::Telemetry& telem)
   (void)SendRaw(tel_id(), &out, sizeof(out));
 }
 
+void BinaryLink::SendEncTelem(const xt_can::EncTelem& enc)
+{
+  xt_can::EncTelem out = enc;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeEnc;
+  out.hdr.seq = tel_seq_++;
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
 void BinaryLink::SendInfo(const xt_can::Info& info)
 {
   xt_can::Info out = info;

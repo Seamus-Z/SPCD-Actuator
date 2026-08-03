@@ -21,6 +21,7 @@ cc_library(
         "inc/HAL/millisecond_timer.h",
         "inc/HAL/phase_current_adc.h",
         "inc/HAL/phase_pwm.h",
+        "inc/HAL/stm32_spi.h",
     ],
     # Physical path inc/HAL/foo.h matches #include "HAL/foo.h".
     includes = ["inc"],

@@ -34,6 +34,7 @@ from xt_proto import (  # noqa: E402
     STATUS_OK,
     STATUS_NOT_RUN,
     Ack,
+    EncTelem,
     Info,
     SnapData,
     SnapMeta,
@@ -263,6 +264,7 @@ class CanBridge:
         self._seq = 0
         self._lock = threading.Lock()
         self.latest: Telemetry | None = None
+        self.latest_enc: EncTelem | None = None
         self.motor_ok = False
         self.motor_error: str | None = None
         self.info: Info | None = None
@@ -326,6 +328,7 @@ class CanBridge:
             self.bus = bus
             self.interface = interface
             self.latest = None
+            self.latest_enc = None
             self.motor_ok = False
             self.motor_error = None
             self.info = None
@@ -405,6 +408,7 @@ class CanBridge:
             self.bus = None
             self.interface = None
             self.latest = None
+            self.latest_enc = None
             self.motor_ok = False
             self.motor_error = None
             self.info = None
@@ -452,6 +456,9 @@ class CanBridge:
                 with self._lock:
                     self.latest = msg
                 self.msglog.maybe_telem(msg)
+            elif isinstance(msg, EncTelem):
+                with self._lock:
+                    self.latest_enc = msg
             elif isinstance(msg, Ack):
                 name = _CMD_NAMES.get(msg.cmd, str(msg.cmd))
                 self.msglog.push(
@@ -683,6 +690,7 @@ class CanBridge:
             connected = self.bus is not None
             interface = self.interface
             t = self.latest
+            enc = self.latest_enc
         if not connected:
             return {
                 "ok": False,
@@ -699,6 +707,13 @@ class CanBridge:
                 "error": "no telemetry yet",
                 **motor,
             }
+        enc_fields = {
+            "enc_raw": enc.raw if enc else 0,
+            "enc_theta_mech_rad": enc.theta_mech_rad if enc else 0.0,
+            "enc_theta_elec_rad": enc.theta_elec_rad if enc else 0.0,
+            "enc_sign": enc.sign if enc else 1,
+            "enc_ok": bool(enc.ok) if enc else bool(getattr(t, "enc_ok", False)),
+        }
         return {
             "ok": True,
             "connected": True,
@@ -723,6 +738,7 @@ class CanBridge:
             "mode": t.mode,
             "pwm_on": t.pwm_on,
             "cisr": t.cisr,
+            **enc_fields,
             **motor,
         }
 

@@ -47,6 +47,7 @@ cc_binary(
     deps = [
         "//fw/HAL:hal",
         "//fw/device:drv8353s",
+        "//fw/device:ma600",
         "//fw/device:motor",
         "//fw/foc_ctrl:voltage_foc",
         "//fw/foc_ctrl:current_loop",

@@ -15,6 +15,9 @@ const CHANNELS = [
   { key: "bus_v", label: "Vbus", path: "voltage/Vbus", color: "#e08a8a", unit: "V", on: false, group: "voltage" },
   { key: "theta_rad", label: "theta", path: "motion/theta", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
   { key: "omega_rad_s", label: "omega", path: "motion/omega", color: "#88b0d0", unit: "rad/s", on: false, group: "motion" },
+  { key: "enc_raw", label: "encRaw", path: "encoder/raw", color: "#c0d088", unit: "", on: true, group: "encoder" },
+  { key: "enc_theta_mech_rad", label: "encMech", path: "encoder/theta_mech", color: "#a8c070", unit: "rad", on: true, group: "encoder" },
+  { key: "enc_theta_elec_rad", label: "encElec", path: "encoder/theta_elec", color: "#88b060", unit: "rad", on: true, group: "encoder" },
   { key: "duty_a", label: "dutyA", path: "pwm/dutyA", color: "#b8c0d0", unit: "", on: false, group: "pwm" },
   { key: "duty_b", label: "dutyB", path: "pwm/dutyB", color: "#98a0b0", unit: "", on: false, group: "pwm" },
   { key: "duty_c", label: "dutyC", path: "pwm/dutyC", color: "#788090", unit: "", on: false, group: "pwm" },
@@ -24,6 +27,7 @@ const GROUPS = [
   { id: "current", label: "Current" },
   { id: "voltage", label: "Voltage" },
   { id: "motion", label: "Motion" },
+  { id: "encoder", label: "Encoder" },
   { id: "pwm", label: "PWM" },
 ];
 

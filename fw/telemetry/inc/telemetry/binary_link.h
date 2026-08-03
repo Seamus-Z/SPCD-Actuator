@@ -26,6 +26,7 @@ class BinaryLink
                    size_t len);
 
   void SendTelemetry(const xt_can::Telemetry& telem);
+  void SendEncTelem(const xt_can::EncTelem& enc);
   void SendAck(uint8_t cmd, uint8_t seq, uint8_t status);
   void SendInfo(const xt_can::Info& info);
   void SendSnapMeta(const xt_can::SnapMeta& meta);

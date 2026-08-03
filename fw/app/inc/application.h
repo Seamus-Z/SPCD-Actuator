@@ -9,6 +9,7 @@
 #include "app_state.h"
 #include "binary_commands.h"
 #include "device/drv8353s.h"
+#include "device/ma600.h"
 #include "foc_ctrl/current_loop.h"
 #include "foc_ctrl/voltage_foc.h"
 #include "pool/pool.h"
@@ -61,14 +62,19 @@ class Application
   static void ControlIsrThunk(void* context);
 
   telemetry::xt_can::Telemetry BuildTelemetry() const;
+  telemetry::xt_can::EncTelem BuildEncTelem() const;
+  void SampleEncoder();
 
   State state_ = State::INIT;
   ::pool::Pool* pool_ = nullptr;
   bool pwm_output_on_ = false;
   bool dq_valid_ = false;
+  bool encoder_ok_ = false;
   uint8_t mode_ = telemetry::xt_can::kModeStop;
   float id_A_ = 0.0f;
   float iq_A_ = 0.0f;
+  float enc_theta_mech_rad_ = 0.0f;
+  float enc_theta_elec_rad_ = 0.0f;
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType telem_last_us_ = 0;
   SnapshotCapture snapshot_{};
@@ -82,6 +88,7 @@ class Application
   ::pool::PoolPtr<hal::PhasePwm> phase_pwm_;
   ::pool::PoolPtr<foc_ctrl::VoltageFoc> voltage_foc_;
   ::pool::PoolPtr<foc_ctrl::CurrentLoop> current_loop_;
+  ::pool::PoolPtr<device::Ma600> ma600_;
   ::pool::PoolPtr<telemetry::BinaryLink> binary_link_;
   BinaryCommands commands_;
 };

@@ -7,6 +7,7 @@
 #include "foc_ctrl/current_loop.h"
 #include "foc_ctrl/voltage_foc.h"
 #include "device/drv8353s.h"
+#include "device/ma600.h"
 #include "device/motor.h"
 
 namespace app
@@ -90,6 +91,21 @@ inline const device::motor::Params& MotorParams()
 
 // Nominal DC bus for open-loop voltage→PWM scaling (no bus ADC yet).
 inline constexpr float kBusVoltage_V = 48.0f;
+
+// AUX2 MA600 defaults (readout only; not used for commutation yet).
+inline device::Ma600::Options Ma600Options()
+{
+  device::Ma600::Options options;
+  options.mosi = PA_11;
+  options.miso = PA_10;
+  options.sck = PF_1;
+  options.cs = PB_7;
+  options.frequency_hz = 6000000;
+  options.filter_us = 64;
+  options.sign = 1.0f;
+  options.offset_rad = 0.0f;
+  return options;
+}
 
 inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
 {

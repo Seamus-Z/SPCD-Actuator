@@ -45,6 +45,7 @@ Application::Application(::pool::Pool* pool)
       phase_pwm_(pool, board::PhasePwmOptions()),
       voltage_foc_(pool, board::VoltageFocOptions()),
       current_loop_(pool, board::CurrentLoopOptions()),
+      ma600_(pool, timer_.get(), board::Ma600Options()),
       binary_link_(pool, can_.get(), kDefaultCanId),
       commands_(this)
 {
@@ -100,6 +101,13 @@ bool Application::Init()
     return false;
   }
   phase_pwm_->EnableAdcTrigger();
+
+  // Encoder readout only — failure must not block motor bring-up.
+  encoder_ok_ = (ma600_.get() != nullptr) && ma600_->Init();
+  if (encoder_ok_)
+  {
+    SampleEncoder();
+  }
 
   telem_last_us_ = timer_->read_us();
   LedOn();
@@ -294,6 +302,10 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagFault);
   }
+  if (encoder_ok_)
+  {
+    t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncOk);
+  }
 
   t.id_mA = AmpsToMilli(id_A_);
   t.iq_mA = AmpsToMilli(iq_A_);
@@ -355,7 +367,49 @@ void Application::MaybeSendTelemetry()
     return;
   }
   telem_last_us_ = now;
+  SampleEncoder();
   binary_link_->SendTelemetry(BuildTelemetry());
+  if (ma600_.get() != nullptr)
+  {
+    binary_link_->SendEncTelem(BuildEncTelem());
+  }
+}
+
+
+void Application::SampleEncoder()
+{
+  if (ma600_.get() == nullptr)
+  {
+    return;
+  }
+  (void)ma600_->Sample();
+  enc_theta_mech_rad_ = ma600_->angle_mech_rad();
+  enc_theta_elec_rad_ =
+      ma600_->angle_elec_rad(board::MotorParams().pole_pairs);
+}
+
+telemetry::xt_can::EncTelem Application::BuildEncTelem() const
+{
+  telemetry::xt_can::EncTelem e{};
+  e.raw = 0;
+  e.theta_mech_mrad = 0;
+  e.theta_elec_mrad = 0;
+  e.sign = 1;
+  e.ok = 0;
+  e.reserved[0] = 0;
+  e.reserved[1] = 0;
+  if (ma600_.get() == nullptr)
+  {
+    return e;
+  }
+  e.raw = ma600_->raw();
+  e.theta_mech_mrad =
+      static_cast<int32_t>(enc_theta_mech_rad_ * 1000.0f);
+  e.theta_elec_mrad =
+      static_cast<int32_t>(enc_theta_elec_rad_ * 1000.0f);
+  e.sign = (ma600_->options().sign >= 0.0f) ? 1 : -1;
+  e.ok = encoder_ok_ ? 1 : 0;
+  return e;
 }
 
 void Application::MaybeSendSnapshot()

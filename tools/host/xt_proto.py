@@ -14,6 +14,7 @@ TYPE_ACK = 3
 TYPE_INFO = 4
 TYPE_SNAP_META = 5
 TYPE_SNAP_DATA = 6
+TYPE_ENC = 7
 
 CMD_STOP = 0
 CMD_DQ = 1
@@ -38,6 +39,7 @@ FLAG_PWM_ON = 1 << 0
 FLAG_CISR = 1 << 1
 FLAG_DQ_VALID = 1 << 2
 FLAG_FAULT = 1 << 3
+FLAG_ENC_OK = 1 << 4
 
 MODE_STOP = 0
 MODE_RAW = 1
@@ -199,6 +201,20 @@ class Telemetry:
     def cisr(self) -> bool:
         return bool(self.flags & FLAG_CISR)
 
+    @property
+    def enc_ok(self) -> bool:
+        return bool(self.flags & FLAG_ENC_OK)
+
+
+@dataclass
+class EncTelem:
+    seq: int
+    raw: int
+    theta_mech_rad: float
+    theta_elec_rad: float
+    sign: int
+    ok: bool
+
 
 _TELEM_FMT = "<BBBBHiiiiiiiiiiiHHHHBB"
 # hdr4 + flags2 + 11*i32 + duty_a/b/c + bus + mode + reserved = 60
@@ -211,6 +227,10 @@ assert struct.calcsize(_INFO_FMT) == 34
 # hdr4 + n/hz/mask + ch/dec + duration = 16
 _SNAP_META_FMT = "<BBBBHHHBBI"
 assert struct.calcsize(_SNAP_META_FMT) == 16
+
+# hdr4 + raw u16 + mech i32 + elec i32 + sign i8 + ok u8 + pad2 = 18
+_ENC_FMT = "<BBBBHiibBxx"
+assert struct.calcsize(_ENC_FMT) == 18
 
 
 def parse_frame(data: bytes) -> Optional[object]:
@@ -281,5 +301,15 @@ def parse_frame(data: bytes) -> Optional[object]:
             duty_c=fields[18],
             bus_v=fields[19] / 1000.0,
             mode=fields[20],
+        )
+    if typ == TYPE_ENC and len(data) >= 18:
+        fields = struct.unpack_from(_ENC_FMT, data, 0)
+        return EncTelem(
+            seq=fields[3],
+            raw=fields[4],
+            theta_mech_rad=fields[5] / 1000.0,
+            theta_elec_rad=fields[6] / 1000.0,
+            sign=fields[7],
+            ok=bool(fields[8]),
         )
     return None

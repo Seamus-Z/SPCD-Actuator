@@ -19,6 +19,7 @@ inline constexpr uint8_t kTypeAck = 3;
 inline constexpr uint8_t kTypeInfo = 4;
 inline constexpr uint8_t kTypeSnapMeta = 5;
 inline constexpr uint8_t kTypeSnapData = 6;
+inline constexpr uint8_t kTypeEnc = 7;
 
 inline constexpr uint8_t kCmdStop = 0;
 inline constexpr uint8_t kCmdDq = 1;
@@ -52,6 +53,7 @@ inline constexpr uint16_t kFlagPwmOn = 1u << 0;
 inline constexpr uint16_t kFlagCisr = 1u << 1;
 inline constexpr uint16_t kFlagDqValid = 1u << 2;
 inline constexpr uint16_t kFlagFault = 1u << 3;
+inline constexpr uint16_t kFlagEncOk = 1u << 4;
 
 inline constexpr uint8_t kModeStop = 0;
 inline constexpr uint8_t kModeRaw = 1;
@@ -130,6 +132,18 @@ struct Telemetry
   uint8_t reserved;
 } __attribute__((packed));
 
+// Compact encoder status (AUX2 MA600). Sent on TelId alongside Telemetry.
+struct EncTelem
+{
+  Header hdr;
+  uint16_t raw;  // 0..65535
+  int32_t theta_mech_mrad;
+  int32_t theta_elec_mrad;
+  int8_t sign;
+  uint8_t ok;
+  uint8_t reserved[2];
+} __attribute__((packed));
+
 // Host -> device: after cmd byte.
 // n_samples (0 => 512), decimate (>=1), reserved, channel_mask (v1: ignore, use default).
 struct SnapRequest
@@ -170,6 +184,8 @@ static_assert(sizeof(Ack) == 8, "Ack size");
 static_assert(sizeof(Info) == 34, "Info size");
 // hdr4 + flags2 + 11*i32 + 3*u16 duty + bus_u16 + mode + reserved = 60
 static_assert(sizeof(Telemetry) == 60, "Telemetry size");
+// hdr4 + raw2 + mech4 + elec4 + sign1 + ok1 + pad2 = 18
+static_assert(sizeof(EncTelem) == 18, "EncTelem size");
 static_assert(sizeof(SnapRequest) == 6, "SnapRequest size");
 static_assert(sizeof(SnapMeta) == 16, "SnapMeta size");
 // hdr4 + idx2 + n1 + r1 + 5*5*i16 = 8 + 50 = 58
