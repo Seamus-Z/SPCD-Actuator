@@ -18,6 +18,7 @@ sudo ip link set "${CAN_IF}" type can \
 sudo ip link set "${CAN_IF}" up
 
 echo "=== Updating ${APP_BIN} over ${CAN_IF} ==="
+echo "(Tip: stop tools/host/gui/web_server.py first — it floods RX and can block BOOT)"
 tools/bootload_test.py \
   --interface "${CAN_IF}" \
   --flash "${APP_BIN}" \

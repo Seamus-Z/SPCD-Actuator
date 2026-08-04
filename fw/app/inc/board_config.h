@@ -5,7 +5,10 @@
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
 #include "foc_ctrl/current_loop.h"
+#include "foc_ctrl/encoder_pll.h"
+#include "foc_ctrl/position_loop.h"
 #include "foc_ctrl/voltage_foc.h"
+#include "math/constants.h"
 #include "device/drv8353s.h"
 #include "device/ma600.h"
 #include "device/motor.h"
@@ -92,7 +95,7 @@ inline const device::motor::Params& MotorParams()
 // Nominal DC bus for open-loop voltage→PWM scaling (no bus ADC yet).
 inline constexpr float kBusVoltage_V = 48.0f;
 
-// AUX2 MA600 defaults (readout only; not used for commutation yet).
+// AUX2 MA600. vel/dq closed-loop use encoder θ_e for commutation.
 inline device::Ma600::Options Ma600Options()
 {
   device::Ma600::Options options;
@@ -107,6 +110,14 @@ inline device::Ma600::Options Ma600Options()
   return options;
 }
 
+inline foc_ctrl::EncoderPll::Options EncoderPllOptions()
+{
+  foc_ctrl::EncoderPll::Options options;
+  options.pll_filter_hz = 400.0f;
+  options.pole_pairs = MotorParams().pole_pairs;
+  return options;
+}
+
 inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
 {
   foc_ctrl::VoltageFoc::Options options;
@@ -114,6 +125,12 @@ inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
   return options;
+}
+
+// Ke [V·s/rad mech] from vendor Vpeak/krpm.
+inline float BemfVPerMechRadS(const device::motor::Params& motor)
+{
+  return motor.bemf_Vpeak_per_krpm * (60.0f / 1000.0f) / math::k2Pi;
 }
 
 inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
@@ -129,8 +146,38 @@ inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
   constexpr float kPwmHz = 15000.0f;
   options.ki_d = motor.id_ki * kPwmHz;
   options.ki_q = motor.iq_ki * kPwmHz;
-  // Soft command clamp = motor peak (DM4310 table).
   options.max_current_A = motor.max_phase_current_A;
+  options.resistance_ohm = motor.phase_resistance_ohm;
+  options.inductance_H = motor.phase_inductance_H;
+  options.v_per_hz = BemfVPerMechRadS(motor);
+  return options;
+}
+
+// moteus servo.pid_position defaults (rev units inside PositionLoop).
+inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
+{
+  const auto& motor = MotorParams();
+  foc_ctrl::PositionLoop::Options options;
+  // moteus pid_position is Nm/rev and Nm/(rev/s); PositionLoop uses turns.
+  options.pid.kp = 4.0f;
+  options.pid.ki = 0.0f;
+  options.pid.kd = 0.05f;
+  options.pid.ilimit = 0.0f;
+  options.pid.sign = -1;
+  // Kt ≈ Ke for PMSM; clamp Iq for first bring-up.
+  options.torque_constant_Nm_A = BemfVPerMechRadS(motor);
+  if (options.torque_constant_Nm_A < 0.05f)
+  {
+    options.torque_constant_Nm_A = 0.1f;
+  }
+  options.max_iq_A = 3.0f;
+  if (options.max_iq_A > motor.max_phase_current_A)
+  {
+    options.max_iq_A = motor.max_phase_current_A;
+  }
+  options.max_torque_Nm =
+      options.torque_constant_Nm_A * options.max_iq_A;
+  options.velocity_threshold = 0.5f;
   return options;
 }
 

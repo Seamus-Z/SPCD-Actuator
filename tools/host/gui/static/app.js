@@ -1,5 +1,5 @@
 /* Scope UI: telemetry tree + signal quality (PlotJuggler / Foxglove style). */
-const modeNames = ["stop", "raw", "vfoc", "dq"];
+const modeNames = ["stop", "raw", "vfoc", "dq", "vel", "cal"];
 const MAX_POINTS = 2000;
 
 const CHANNELS = [
@@ -14,7 +14,8 @@ const CHANNELS = [
   { key: "vq_v", label: "Vq", path: "voltage/Vq", color: "#d08a6a", unit: "V", on: false, group: "voltage" },
   { key: "bus_v", label: "Vbus", path: "voltage/Vbus", color: "#e08a8a", unit: "V", on: false, group: "voltage" },
   { key: "theta_rad", label: "theta", path: "motion/theta", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
-  { key: "omega_rad_s", label: "omega", path: "motion/omega", color: "#88b0d0", unit: "rad/s", on: false, group: "motion" },
+  { key: "omega_rad_s", label: "omegaMeas", path: "motion/omega", color: "#88b0d0", unit: "rad/s", on: true, group: "motion" },
+  { key: "omega_cmd_rad_s", label: "omegaCmd", path: "motion/omega_cmd", color: "#d0a088", unit: "rad/s", on: true, group: "motion" },
   { key: "enc_raw", label: "encRaw", path: "encoder/raw", color: "#c0d088", unit: "", on: true, group: "encoder" },
   { key: "enc_theta_mech_rad", label: "encMech", path: "encoder/theta_mech", color: "#a8c070", unit: "rad", on: true, group: "encoder" },
   { key: "enc_theta_elec_rad", label: "encElec", path: "encoder/theta_elec", color: "#88b060", unit: "rad", on: true, group: "encoder" },
@@ -59,6 +60,9 @@ let view = {
   showMean: true,
 };
 let lastMsgId = 0;
+let lastTelemSid = 0;
+let telemInflight = false;
+let plotDirty = false;
 let latestVals = {};
 let focusKey = "iq_a";
 let searchQuery = "";
@@ -338,9 +342,9 @@ function clearHist() {
   updateSigStats(true);
 }
 
-function pushSample(t) {
+function pushSample(t, tHostMs = null) {
   if (view.pause) return;
-  hist.t.push(performance.now());
+  hist.t.push(tHostMs == null ? performance.now() : tHostMs);
   for (const ch of CHANNELS) {
     const v = Number(t[ch.key]);
     hist[ch.key].push(Number.isFinite(v) ? v : 0);
@@ -350,10 +354,7 @@ function pushSample(t) {
     hist.t.shift();
     for (const ch of CHANNELS) hist[ch.key].shift();
   }
-  if (view.autoY) autoscaleY(false);
-  renderTree(false);
-  draw();
-  updateSigStats(false);
+  plotDirty = true;
 }
 
 function activeSeries() {
@@ -595,7 +596,12 @@ function appendMsgs(items) {
   const nearBottom =
     msgLogEl.scrollHeight - msgLogEl.scrollTop - msgLogEl.clientHeight < 40;
   for (const m of items) {
-    if (m.kind === "RX" && m.text && m.text.startsWith("TEL ") && !showTelem) {
+    if (
+      m.kind === "RX" &&
+      m.text &&
+      (m.text.startsWith("TEL ") || m.text.startsWith("REPLY ")) &&
+      !showTelem
+    ) {
       continue;
     }
     const div = document.createElement("div");
@@ -694,9 +700,15 @@ async function postCmd(body) {
     body: JSON.stringify(body),
   });
   const j = await r.json();
-  statusEl.textContent = j.ok
-    ? `ACK ok cmd=${j.cmd} status=${j.status}`
-    : `error: ${j.error || JSON.stringify(j)}`;
+  if (!j.ok) {
+    statusEl.textContent = `error: ${j.error || JSON.stringify(j)}`;
+    return j;
+  }
+  if (j.stream) {
+    statusEl.textContent = `stream ${j.stream} @ 50Hz`;
+  } else {
+    statusEl.textContent = `ACK ok cmd=${j.cmd} status=${j.status}`;
+  }
   return j;
 }
 
@@ -708,6 +720,97 @@ document.getElementById("btnDq").onclick = () =>
     iq: Number(document.getElementById("iqA").value),
     omega: Number(document.getElementById("omega").value),
   });
+
+document.getElementById("btnVel").onclick = () =>
+  postCmd({
+    op: "vel",
+    omega_mech: Number(document.getElementById("omegaMech").value),
+    id: Number(document.getElementById("idA").value),
+  });
+
+document.getElementById("btnCalLock").onclick = () =>
+  postCmd({
+    op: "cal_lock",
+    voltage: Number(document.getElementById("calV").value),
+  });
+document.getElementById("btnCalSpin").onclick = () =>
+  postCmd({
+    op: "cal_enc",
+    voltage: Number(document.getElementById("calV").value),
+    omega_elec: Number(document.getElementById("calOmega").value),
+  });
+document.getElementById("btnCalAbort").onclick = () =>
+  postCmd({ op: "cal_abort" });
+
+function judgeCalResult(t) {
+  const resid = Number(t.cal_residual_rad) || 0;
+  const samples = Number(t.cal_samples) || 0;
+  const residDeg = (resid * 180) / Math.PI;
+  let grade = "bad";
+  let title = "不合格";
+  if (resid < 0.35) {
+    grade = "good";
+    title = "良好 — 可用于编码器换相";
+  } else if (resid < 0.7) {
+    grade = "warn";
+    title = "勉强 — 仅建议低速试闭环";
+  } else {
+    grade = "bad";
+    title = "不合格 — 不要用于高速编码器换相";
+  }
+  const tips = [];
+  if (t.cal_persisted) tips.push("已自动写入 Flash NVS，掉电后仍会加载");
+  else tips.push("运行时已应用；Flash 写入未确认，可重做一次标定");
+  if (samples < 32) tips.push("采样偏少，请重做");
+  if (resid >= 0.7) {
+    tips.push("略增大校准电压（如 1.5～2.0 V）");
+    tips.push("确认轴空载且 enc_raw 连续变化");
+  }
+  return { grade, title, resid, residDeg, samples, tips };
+}
+
+function updateCalPanel(t) {
+  const pct = Math.round((t.cal_progress || 0) * 100);
+  const bar = document.getElementById("calProgressBar");
+  const status = document.getElementById("calStatus");
+  const verdict = document.getElementById("calVerdict");
+  const box = document.getElementById("calResult");
+  if (!bar || !status || !verdict || !box) return;
+  bar.style.width = `${pct}%`;
+  status.textContent = `${t.cal_state_name || "idle"} · ${pct}% · samples=${t.cal_samples || 0}`;
+  if (t.cal_state_name === "done" && t.cal_ok) {
+    const j = judgeCalResult(t);
+    const offF = Number(t.cal_offset_rad).toFixed(6);
+    verdict.textContent = `判定：${j.title}（residual ${j.resid.toFixed(3)} rad ≈ ${j.residDeg.toFixed(1)}°）`;
+    box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    box.classList.add(`cal-${j.grade}`);
+    box.textContent =
+      `判定：${j.title}\n` +
+      `sign = ${t.cal_sign}\n` +
+      `offset_rad = ${offF}\n` +
+      `residual_rms_elec ≈ ${j.resid.toFixed(4)} rad\n` +
+      `samples = ${j.samples}\n` +
+      `flash_nvs = ${t.cal_persisted ? "OK" : "pending/fail"}\n\n` +
+      j.tips.map((s, i) => `${i + 1}. ${s}`).join("\n");
+  } else if (t.cal_state_name === "failed") {
+    verdict.textContent = "判定：失败 — 未完成有效拟合";
+    box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    box.classList.add("cal-bad");
+    box.textContent = "FAILED — 检查编码器/电压后重试";
+  } else if (
+    t.cal_state_name === "sense" ||
+    t.cal_state_name === "fwd" ||
+    t.cal_state_name === "rev" ||
+    t.cal_state_name === "locking"
+  ) {
+    verdict.textContent =
+      t.cal_state_name === "locking"
+        ? "锁定中… 转子会被磁场拉住，勿用手转"
+        : "转圈校准中… 保持轴空载";
+    box.classList.remove("cal-good", "cal-warn", "cal-bad");
+  }
+}
+
 document.getElementById("btnVfoc").onclick = () =>
   postCmd({
     op: "vfoc",
@@ -717,29 +820,62 @@ document.getElementById("btnVfoc").onclick = () =>
   });
 
 async function tickTelem() {
+  if (telemInflight) return;
+  telemInflight = true;
   try {
-    const t = await fetch("/api/telem").then((r) => r.json());
+    const t = await fetch(`/api/telem?after=${lastTelemSid}`).then((r) => r.json());
     if (!t.connected) {
-      if (!statusEl.textContent.startsWith("ACK")) {
+      if (!statusEl.textContent.startsWith("ACK") && !statusEl.textContent.startsWith("stream")) {
         statusEl.textContent = "CAN disconnected";
       }
       return;
     }
     if (t && t.ok !== false && t.id_a !== undefined) {
+      if (t.cal_state_name !== undefined) updateCalPanel(t);
       document.getElementById("sId").textContent =
         `${t.id_a.toFixed(3)} / ${t.idref_a.toFixed(3)} A`;
       document.getElementById("sIq").textContent =
         `${t.iq_a.toFixed(3)} / ${t.iqref_a.toFixed(3)} A`;
       document.getElementById("sMode").textContent =
         `${modeNames[t.mode] || t.mode} / ${t.cisr ? 1 : 0}`;
-      pushSample(t);
-      if (!statusEl.textContent.startsWith("ACK")) {
-        statusEl.textContent = `live @ ${t.interface || "?"}`;
+      // Empty samples = no new points. Do NOT re-push latest (creates stairs).
+      const samples = Array.isArray(t.samples) ? t.samples : [];
+      if (samples.length) {
+        const t0 = performance.now();
+        const n = samples.length;
+        const hasMono = samples.every((s) => typeof s._t_mono === "number");
+        for (let i = 0; i < n; i++) {
+          const s = samples[i];
+          const hostTs = hasMono
+            ? t0 - (samples[n - 1]._t_mono - s._t_mono) * 1000
+            : t0 - (n - 1 - i) * 20;
+          pushSample(s, hostTs);
+        }
+      }
+      if (typeof t.sid === "number" && t.sid > lastTelemSid) lastTelemSid = t.sid;
+      const hz = Number(t.rx_hz) || 0;
+      if (!statusEl.textContent.startsWith("ACK") && !statusEl.textContent.startsWith("stream")) {
+        statusEl.textContent = `live ${hz.toFixed(0)} Hz @ ${t.interface || "?"}`;
+      } else if (statusEl.textContent.startsWith("stream")) {
+        statusEl.textContent = `stream ${hz.toFixed(0)} Hz @ ${t.interface || "?"}`;
       }
     }
   } catch (e) {
     statusEl.textContent = "telem offline";
+  } finally {
+    telemInflight = false;
   }
+}
+
+function pumpPlot() {
+  if (plotDirty) {
+    plotDirty = false;
+    if (view.autoY) autoscaleY(false);
+    renderTree(false);
+    draw();
+    updateSigStats(false);
+  }
+  requestAnimationFrame(pumpPlot);
 }
 
 async function tickMessages() {
@@ -758,8 +894,10 @@ renderTree(true);
 updateSigStats(true);
 draw();
 refreshPorts();
-setInterval(tickTelem, 10);
+// Match firmware live telem (~50 Hz).
+setInterval(tickTelem, 20);
 setInterval(tickMessages, 200);
+requestAnimationFrame(pumpPlot);
 window.addEventListener("resize", () => {
   draw();
   drawSnap();
@@ -786,11 +924,13 @@ function setMode(mode) {
   uiMode = mode;
   document.getElementById("panelLive").hidden = mode !== "live";
   document.getElementById("panelSnap").hidden = mode !== "snap";
+  const panelCal = document.getElementById("panelCal");
+  if (panelCal) panelCal.hidden = mode !== "cal";
   for (const btn of document.querySelectorAll(".modeBtn")) {
     btn.classList.toggle("active", btn.dataset.mode === mode);
   }
   if (mode === "live") draw();
-  else drawSnap();
+  else if (mode === "snap") drawSnap();
 }
 
 for (const btn of document.querySelectorAll(".modeBtn")) {

@@ -64,6 +64,26 @@ void BinaryLink::SendEncTelem(const xt_can::EncTelem& enc)
   (void)SendRaw(tel_id(), &out, sizeof(out));
 }
 
+void BinaryLink::SendCalTelem(const xt_can::CalTelem& cal)
+{
+  xt_can::CalTelem out = cal;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeCal;
+  out.hdr.seq = tel_seq_++;
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
+void BinaryLink::SendCtrlReply(const xt_can::CtrlReply& reply)
+{
+  xt_can::CtrlReply out = reply;
+  out.hdr.magic = xt_can::kMagic;
+  out.hdr.ver = xt_can::kVersion;
+  out.hdr.type = xt_can::kTypeCtrlReply;
+  // seq filled by caller (echo command seq)
+  (void)SendRaw(tel_id(), &out, sizeof(out));
+}
+
 void BinaryLink::SendInfo(const xt_can::Info& info)
 {
   xt_can::Info out = info;
@@ -127,7 +147,11 @@ bool BinaryLink::HandleFrame(const FDCAN_RxHeaderTypeDef& header,
   {
     status = handler_(context_, cmd, hdr.seq, payload, payload_len);
   }
-  SendAck(cmd, hdr.seq, status);
+  // Stream/query cmds reply with CtrlReply (sent by Application/BinaryCommands).
+  if (!xt_can::UsesCtrlReply(cmd))
+  {
+    SendAck(cmd, hdr.seq, status);
+  }
   return true;
 }
 

@@ -302,3 +302,30 @@ canvas#plot {
   white-space: pre-wrap;
   min-height: 3.2em;
 }
+
+.calProgressWrap {
+  margin-top: 0.75rem;
+  height: 8px;
+  background: #121826;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.calProgressBar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+.infoBox.cal-good {
+  border-color: #3d9a7a;
+  box-shadow: inset 3px 0 0 #3d9a7a;
+}
+.infoBox.cal-warn {
+  border-color: #c9a227;
+  box-shadow: inset 3px 0 0 #c9a227;
+}
+.infoBox.cal-bad {
+  border-color: var(--danger);
+  box-shadow: inset 3px 0 0 var(--danger);
+}

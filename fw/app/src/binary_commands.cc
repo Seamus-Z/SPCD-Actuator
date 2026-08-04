@@ -5,6 +5,7 @@
 #include "application.h"
 #include "board_config.h"
 #include "device/motor.h"
+#include "foc_ctrl/simple_pi.h"
 #include "telemetry/xt_can.h"
 
 namespace app
@@ -37,6 +38,16 @@ bool ReadU16(const uint8_t* p, size_t len, size_t off, uint16_t* out)
   return true;
 }
 
+bool NotReadI32(const uint8_t* p, size_t len, size_t off, int32_t* out)
+{
+  return ReadI32(p, len, off, out) == false;
+}
+
+bool NotReadU16(const uint8_t* p, size_t len, size_t off, uint16_t* out)
+{
+  return ReadU16(p, len, off, out) == false;
+}
+
 }  // namespace
 
 uint8_t BinaryCommands::Thunk(void* context, uint8_t cmd, uint8_t seq,
@@ -53,23 +64,45 @@ uint8_t BinaryCommands::Thunk(void* context, uint8_t cmd, uint8_t seq,
 uint8_t BinaryCommands::Handle(uint8_t cmd, uint8_t seq, const uint8_t* payload,
                                size_t payload_len)
 {
+  uint8_t status = telemetry::xt_can::kStatusBadCmd;
   switch (cmd)
   {
     case telemetry::xt_can::kCmdStop:
-      return HandleStop();
+      status = HandleStop();
+      break;
+    case telemetry::xt_can::kCmdQuery:
+      status = HandleQuery();
+      break;
     case telemetry::xt_can::kCmdDq:
-      return HandleDq(payload, payload_len);
+      status = HandleDq(payload, payload_len);
+      break;
+    case telemetry::xt_can::kCmdVel:
+      status = HandleVel(payload, payload_len);
+      break;
+    case telemetry::xt_can::kCmdCal:
+      status = HandleCal(payload, payload_len);
+      break;
     case telemetry::xt_can::kCmdVfoc:
-      return HandleVfoc(payload, payload_len);
+      status = HandleVfoc(payload, payload_len);
+      break;
     case telemetry::xt_can::kCmdRaw:
-      return HandleRaw(payload, payload_len);
+      status = HandleRaw(payload, payload_len);
+      break;
     case telemetry::xt_can::kCmdInfo:
-      return HandleInfo(seq);
+      status = HandleInfo(seq);
+      break;
     case telemetry::xt_can::kCmdSnap:
-      return HandleSnap(seq, payload, payload_len);
+      status = HandleSnap(seq, payload, payload_len);
+      break;
     default:
-      return telemetry::xt_can::kStatusBadCmd;
+      status = telemetry::xt_can::kStatusBadCmd;
+      break;
   }
+  if (telemetry::xt_can::UsesCtrlReply(cmd))
+  {
+    app_->ReplyCtrl(cmd, seq, status);
+  }
+  return status;
 }
 
 uint8_t BinaryCommands::HandleStop()
@@ -78,37 +111,76 @@ uint8_t BinaryCommands::HandleStop()
   return telemetry::xt_can::kStatusOk;
 }
 
+uint8_t BinaryCommands::HandleQuery()
+{
+  // Idle poll / keep-alive while streaming. Encoder sampled in ReplyCtrl.
+  return telemetry::xt_can::kStatusOk;
+}
+
 uint8_t BinaryCommands::HandleDq(const uint8_t* payload, size_t payload_len)
 {
-  if (app_->state_ != State::RUN || !app_->phase_pwm_->init_ok())
+  if (app_->state_ != State::RUN || app_->phase_pwm_->init_ok() == false)
   {
     return telemetry::xt_can::kStatusNotRun;
   }
   int32_t id_mA = 0;
   int32_t iq_mA = 0;
   int32_t omega = 0;
-  if (!ReadI32(payload, payload_len, 0, &id_mA) ||
-      !ReadI32(payload, payload_len, 4, &iq_mA) ||
-      !ReadI32(payload, payload_len, 8, &omega))
+  if (NotReadI32(payload, payload_len, 0, &id_mA) ||
+      NotReadI32(payload, payload_len, 4, &iq_mA) ||
+      NotReadI32(payload, payload_len, 8, &omega))
   {
     return telemetry::xt_can::kStatusBadLen;
   }
 
+  const float id_ref = MilliToAmps(id_mA);
+  const float iq_ref = MilliToAmps(iq_mA);
+  const float theta_rate = static_cast<float>(omega) * 0.001f;
+  if (app_->mode_ == telemetry::xt_can::kModeDq &&
+      app_->current_loop_.get() != nullptr && app_->current_loop_->active())
+  {
+    app_->current_loop_->SetRefs(id_ref, iq_ref);
+    const bool use_enc =
+        app_->encoder_ok_ && app_->ma600_.get() != nullptr;
+    if (use_enc == false)
+    {
+      app_->current_loop_->SetThetaRate(theta_rate);
+    }
+    return telemetry::xt_can::kStatusOk;
+  }
+
   app_->voltage_foc_->Stop();
+  if (app_->position_loop_.get() != nullptr)
+  {
+    app_->position_loop_->Stop();
+  }
   app_->phase_pwm_->DisableControlIsr();
 
+  const bool use_enc = app_->encoder_ok_ && app_->ma600_.get() != nullptr;
+  float theta_elec = 0.0f;
+  const float* theta_override = nullptr;
+  if (use_enc)
+  {
+    app_->SampleEncoder();
+    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
+    theta_elec = app_->enc_theta_elec_rad_;
+    theta_override = &theta_elec;
+  }
+
   foc_ctrl::CurrentLoop::Command cmd;
-  cmd.theta_rad = 0.0f;
-  cmd.id_A = MilliToAmps(id_mA);
-  cmd.iq_A = MilliToAmps(iq_mA);
-  cmd.theta_rate_rad_s = static_cast<float>(omega) * 0.001f;
+  cmd.theta_rad = theta_elec;
+  cmd.id_A = id_ref;
+  cmd.iq_A = iq_ref;
+  cmd.theta_rate_rad_s = use_enc ? 0.0f : theta_rate;
   app_->current_loop_->Start(cmd);
 
   app_->last_current_ = app_->current_adc_->ReadLatest();
   foc_ctrl::CurrentLoop::Duties duties;
-  if (!app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
-                                 app_->last_current_.i2_A,
-                                 app_->last_current_.i3_A, &duties))
+  if (app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
+                                app_->last_current_.i2_A,
+                                app_->last_current_.i3_A, &duties,
+                                theta_override) == false)
   {
     app_->current_loop_->Stop();
     return telemetry::xt_can::kStatusFail;
@@ -124,33 +196,122 @@ uint8_t BinaryCommands::HandleDq(const uint8_t* payload, size_t payload_len)
   return telemetry::xt_can::kStatusOk;
 }
 
+uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
+{
+  if (app_->state_ != State::RUN || app_->phase_pwm_->init_ok() == false)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr ||
+      app_->position_loop_.get() == nullptr)
+  {
+    return telemetry::xt_can::kStatusFail;
+  }
+
+  int32_t omega_mech_mrad_s = 0;
+  int32_t id_mA = 0;
+  if (NotReadI32(payload, payload_len, 0, &omega_mech_mrad_s) ||
+      NotReadI32(payload, payload_len, 4, &id_mA))
+  {
+    return telemetry::xt_can::kStatusBadLen;
+  }
+
+  const float omega_ref = static_cast<float>(omega_mech_mrad_s) * 0.001f;
+  const float id_ref = MilliToAmps(id_mA);
+  if (app_->mode_ == telemetry::xt_can::kModeVel &&
+      app_->position_loop_.get() != nullptr && app_->position_loop_->active() &&
+      app_->current_loop_.get() != nullptr && app_->current_loop_->active())
+  {
+    app_->position_loop_->SetVelocity(omega_ref);
+    app_->position_loop_->SetIdRef(id_ref);
+    app_->current_loop_->SetRefs(id_ref, app_->current_loop_->iq_ref_A());
+    app_->current_loop_->SetOmega(omega_ref * board::MotorParams().pole_pairs,
+                                  omega_ref);
+    return telemetry::xt_can::kStatusOk;
+  }
+
+  app_->voltage_foc_->Stop();
+  app_->phase_pwm_->DisableControlIsr();
+
+  // moteus velocity mode: position=NaN + velocity command.
+  app_->SampleEncoder();
+  app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+  app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
+  app_->position_loop_->Start(foc_ctrl::QuietNan(), omega_ref, id_ref);
+
+  const float theta_elec = app_->enc_theta_elec_rad_;
+  foc_ctrl::CurrentLoop::Command cmd;
+  cmd.theta_rad = theta_elec;
+  cmd.id_A = id_ref;
+  cmd.iq_A = 0.0f;
+  cmd.theta_rate_rad_s = 0.0f;
+  app_->current_loop_->Start(cmd);
+  app_->current_loop_->SetOmega(omega_ref * board::MotorParams().pole_pairs,
+                                omega_ref);
+
+  app_->last_current_ = app_->current_adc_->ReadLatest();
+  foc_ctrl::CurrentLoop::Duties duties;
+  if (app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
+                                app_->last_current_.i2_A,
+                                app_->last_current_.i3_A, &duties,
+                                &theta_elec) == false)
+  {
+    app_->current_loop_->Stop();
+    app_->position_loop_->Stop();
+    return telemetry::xt_can::kStatusFail;
+  }
+  app_->id_A_ = app_->current_loop_->id_A();
+  app_->iq_A_ = app_->current_loop_->iq_A();
+  app_->dq_valid_ = app_->last_current_.ok;
+  app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  app_->gate_driver_->PowerOn();
+  app_->pwm_output_on_ = true;
+  app_->mode_ = telemetry::xt_can::kModeVel;
+  app_->StartControlIsr();
+  return telemetry::xt_can::kStatusOk;
+}
+
 uint8_t BinaryCommands::HandleVfoc(const uint8_t* payload, size_t payload_len)
 {
-  if (app_->state_ != State::RUN || !app_->phase_pwm_->init_ok())
+  if (app_->state_ != State::RUN || app_->phase_pwm_->init_ok() == false)
   {
     return telemetry::xt_can::kStatusNotRun;
   }
   int32_t theta_mrad = 0;
   int32_t v_mV = 0;
   int32_t omega = 0;
-  if (!ReadI32(payload, payload_len, 0, &theta_mrad) ||
-      !ReadI32(payload, payload_len, 4, &v_mV) ||
-      !ReadI32(payload, payload_len, 8, &omega))
+  if (NotReadI32(payload, payload_len, 0, &theta_mrad) ||
+      NotReadI32(payload, payload_len, 4, &v_mV) ||
+      NotReadI32(payload, payload_len, 8, &omega))
   {
     return telemetry::xt_can::kStatusBadLen;
   }
 
+  const float v_ref = static_cast<float>(v_mV) * 0.001f;
+  const float omega_ref = static_cast<float>(omega) * 0.001f;
+  if (app_->mode_ == telemetry::xt_can::kModeVfoc &&
+      app_->voltage_foc_.get() != nullptr && app_->voltage_foc_->active())
+  {
+    app_->voltage_foc_->SetVoltage(v_ref);
+    app_->voltage_foc_->SetThetaRate(omega_ref);
+    return telemetry::xt_can::kStatusOk;
+  }
+
   app_->current_loop_->Stop();
+  if (app_->position_loop_.get() != nullptr)
+  {
+    app_->position_loop_->Stop();
+  }
   app_->phase_pwm_->DisableControlIsr();
 
   foc_ctrl::VoltageFoc::Command cmd;
   cmd.theta_rad = static_cast<float>(theta_mrad) * 0.001f;
-  cmd.voltage_V = static_cast<float>(v_mV) * 0.001f;
-  cmd.theta_rate_rad_s = static_cast<float>(omega) * 0.001f;
+  cmd.voltage_V = v_ref;
+  cmd.theta_rate_rad_s = omega_ref;
   app_->voltage_foc_->Start(cmd);
 
   foc_ctrl::VoltageFoc::Duties duties;
-  if (!app_->voltage_foc_->Step(0.0f, &duties))
+  if (app_->voltage_foc_->Step(0.0f, &duties) == false)
   {
     app_->voltage_foc_->Stop();
     return telemetry::xt_can::kStatusFail;
@@ -166,18 +327,115 @@ uint8_t BinaryCommands::HandleVfoc(const uint8_t* payload, size_t payload_len)
   return telemetry::xt_can::kStatusOk;
 }
 
+uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
+{
+  if (app_->state_ != State::RUN || app_->phase_pwm_->init_ok() == false)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (payload == nullptr ||
+      payload_len < sizeof(telemetry::xt_can::CalRequest))
+  {
+    return telemetry::xt_can::kStatusBadLen;
+  }
+
+  telemetry::xt_can::CalRequest req{};
+  std::memcpy(&req, payload, sizeof(req));
+
+  if (req.subcmd == telemetry::xt_can::kCalSubAbort)
+  {
+    app_->encoder_cal_.Stop();
+    app_->StopOutput();
+    return telemetry::xt_can::kStatusOk;
+  }
+  const bool is_spin = req.subcmd == telemetry::xt_can::kCalSubEncPhase;
+  const bool is_lock = req.subcmd == telemetry::xt_can::kCalSubEncLock;
+  if (is_spin == false && is_lock == false)
+  {
+    return telemetry::xt_can::kStatusBadCmd;
+  }
+  if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr)
+  {
+    return telemetry::xt_can::kStatusFail;
+  }
+
+  if (app_->current_loop_.get() != nullptr)
+  {
+    app_->current_loop_->Stop();
+  }
+  if (app_->position_loop_.get() != nullptr)
+  {
+    app_->position_loop_->Stop();
+  }
+  if (app_->voltage_foc_.get() != nullptr)
+  {
+    app_->voltage_foc_->Stop();
+  }
+  app_->phase_pwm_->DisableControlIsr();
+
+  calibration::EncoderPhaseCal::Options opts;
+  opts.method = is_lock ? calibration::EncoderPhaseCal::Method::Lock
+                        : calibration::EncoderPhaseCal::Method::Spin;
+  opts.voltage_V = static_cast<float>(req.voltage_mV) * 0.001f;
+  opts.omega_elec_rad_s = static_cast<float>(req.omega_elec_mrad_s) * 0.001f;
+  if (opts.omega_elec_rad_s < 0.0f)
+  {
+    opts.omega_elec_rad_s = -opts.omega_elec_rad_s;
+  }
+  opts.pole_pairs = board::MotorParams().pole_pairs;
+  opts.mech_revs_each_way = 1.0f;
+  if (is_lock)
+  {
+    opts.voltage_V = (opts.voltage_V > 0.05f) ? opts.voltage_V : 1.5f;
+    opts.omega_elec_rad_s = 0.0f;
+  }
+  else
+  {
+    opts.voltage_V = (opts.voltage_V > 0.05f) ? opts.voltage_V : 0.8f;
+    opts.omega_elec_rad_s =
+        (opts.omega_elec_rad_s > 1.0f) ? opts.omega_elec_rad_s : 80.0f;
+  }
+
+  // Clear prior offset so calibration sees raw counts.
+  app_->ma600_->SetOffsetRad(0.0f);
+  app_->ma600_->SetSign(1.0f);
+  app_->encoder_cal_persisted_ = false;
+  app_->encoder_cal_.Start(opts);
+  app_->cal_last_omega_cmd_ = app_->encoder_cal_.omega_cmd_elec();
+
+  foc_ctrl::VoltageFoc::Command cmd;
+  cmd.theta_rad = 0.0f;
+  cmd.voltage_V = opts.voltage_V;
+  cmd.theta_rate_rad_s = app_->cal_last_omega_cmd_;  // 0 for lock
+  app_->voltage_foc_->Start(cmd);
+
+  foc_ctrl::VoltageFoc::Duties duties;
+  if (app_->voltage_foc_->Step(0.0f, &duties) == false)
+  {
+    app_->voltage_foc_->Stop();
+    app_->encoder_cal_.Stop();
+    return telemetry::xt_can::kStatusFail;
+  }
+  app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  app_->gate_driver_->PowerOn();
+  app_->pwm_output_on_ = true;
+  app_->mode_ = telemetry::xt_can::kModeCal;
+  app_->StartControlIsr();
+  return telemetry::xt_can::kStatusOk;
+}
+
 uint8_t BinaryCommands::HandleRaw(const uint8_t* payload, size_t payload_len)
 {
-  if (app_->state_ != State::RUN || !app_->phase_pwm_->init_ok())
+  if (app_->state_ != State::RUN || app_->phase_pwm_->init_ok() == false)
   {
     return telemetry::xt_can::kStatusNotRun;
   }
   uint16_t a = 0;
   uint16_t b = 0;
   uint16_t c = 0;
-  if (!ReadU16(payload, payload_len, 0, &a) ||
-      !ReadU16(payload, payload_len, 2, &b) ||
-      !ReadU16(payload, payload_len, 4, &c))
+  if (NotReadU16(payload, payload_len, 0, &a) ||
+      NotReadU16(payload, payload_len, 2, &b) ||
+      NotReadU16(payload, payload_len, 4, &c))
   {
     return telemetry::xt_can::kStatusBadLen;
   }
@@ -187,8 +445,18 @@ uint8_t BinaryCommands::HandleRaw(const uint8_t* payload, size_t payload_len)
     return telemetry::xt_can::kStatusFail;
   }
 
+  if (app_->mode_ == telemetry::xt_can::kModeRaw && app_->pwm_output_on_)
+  {
+    app_->phase_pwm_->SetDuty(a, b, c);
+    return telemetry::xt_can::kStatusOk;
+  }
+
   app_->voltage_foc_->Stop();
   app_->current_loop_->Stop();
+  if (app_->position_loop_.get() != nullptr)
+  {
+    app_->position_loop_->Stop();
+  }
   app_->phase_pwm_->DisableControlIsr();
   app_->dq_valid_ = false;
 
@@ -230,7 +498,8 @@ uint8_t BinaryCommands::HandleInfo(uint8_t seq)
 uint8_t BinaryCommands::HandleSnap(uint8_t seq, const uint8_t* payload,
                                    size_t payload_len)
 {
-  if (app_->phase_pwm_.get() == nullptr || !app_->phase_pwm_->control_isr_on())
+  if (app_->phase_pwm_.get() == nullptr ||
+      app_->phase_pwm_->control_isr_on() == false)
   {
     return telemetry::xt_can::kStatusNotRun;
   }
@@ -257,7 +526,7 @@ uint8_t BinaryCommands::HandleSnap(uint8_t seq, const uint8_t* payload,
 
   const uint16_t pwm_hz =
       static_cast<uint16_t>(board::PhasePwmOptions().rate_hz);
-  if (!app_->snapshot_.Arm(n_samples, decimate, pwm_hz))
+  if (app_->snapshot_.Arm(n_samples, decimate, pwm_hz) == false)
   {
     return telemetry::xt_can::kStatusFail;
   }

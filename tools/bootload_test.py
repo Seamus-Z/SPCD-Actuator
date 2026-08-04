@@ -86,13 +86,28 @@ class BootloaderClient:
             data=data))
 
     def enter(self):
-        # A classic frame is sufficient for the four-byte entry key and is
-        # deliberately independent of CAN-FD data phase configuration.
-        self._send(BOOT_REQUEST_ID, BOOT_REQUEST_PAYLOAD, False, fd=False)
-        # APP first emits its three-blink acknowledgement, then resets.  The
-        # bootloader emits four more startup blinks before initializing FDCAN.
-        # On a 16 MHz HSI build this can exceed the old 1.5 s delay.
-        time.sleep(3.5)
+        # Spam BOOT while draining RX. APP may flood Tel+Enc (~1 kHz); gs_usb
+        # then reports ENOBUFS on TX and a single BOOT never leaves the host.
+        deadline = time.monotonic() + 5.0
+        sent = 0
+        while time.monotonic() < deadline:
+            # Free USB adapter buffers first.
+            while self.bus.recv(0) is not None:
+                pass
+            try:
+                self._send(BOOT_REQUEST_ID, BOOT_REQUEST_PAYLOAD, False, fd=False)
+                sent += 1
+            except Exception:
+                pass
+            time.sleep(0.02)
+        if self.verbose:
+            print(f"BOOT sent {sent} times; waiting for bootloader startup")
+        # APP blinks 3x then resets; BL blinks before FDCAN init (HSI ~16 MHz).
+        drain_until = time.monotonic() + 2.0
+        while time.monotonic() < drain_until:
+            while self.bus.recv(0) is not None:
+                pass
+            time.sleep(0.05)
 
     def _receive_response(self, timeout=1.0):
         deadline = time.monotonic() + timeout

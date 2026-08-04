@@ -23,7 +23,10 @@ class BinaryCommands
 
  private:
   uint8_t HandleStop();
+  uint8_t HandleQuery();
   uint8_t HandleDq(const uint8_t* payload, size_t payload_len);
+  uint8_t HandleVel(const uint8_t* payload, size_t payload_len);
+  uint8_t HandleCal(const uint8_t* payload, size_t payload_len);
   uint8_t HandleVfoc(const uint8_t* payload, size_t payload_len);
   uint8_t HandleRaw(const uint8_t* payload, size_t payload_len);
   uint8_t HandleInfo(uint8_t seq);

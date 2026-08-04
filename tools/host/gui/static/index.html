@@ -16,6 +16,7 @@
       <nav class="modeBar" id="modeBar">
         <button type="button" class="modeBtn active" data-mode="live">Live</button>
         <button type="button" class="modeBtn" data-mode="snap">Snapshot</button>
+        <button type="button" class="modeBtn" data-mode="cal">Cal</button>
       </nav>
     </div>
   </header>
@@ -41,10 +42,15 @@
       <input id="idA" type="number" step="0.1" value="0" />
       <label>Iq (A)</label>
       <input id="iqA" type="number" step="0.1" value="0.5" />
-      <label>ω elec (rad/s)</label>
+      <label>ω elec (rad/s) — open-loop dq only</label>
       <input id="omega" type="number" step="1" value="50" />
       <div class="row">
         <button id="btnDq" type="button">Start dq</button>
+      </div>
+      <label style="margin-top:1rem">ω_mech (rad/s) — moteus PID vel</label>
+      <input id="omegaMech" type="number" step="1" value="20" />
+      <div class="row">
+        <button id="btnVel" type="button">Start vel (PID)</button>
         <button class="stop" id="btnStop" type="button">Stop</button>
       </div>
       <label style="margin-top:1rem">Vfoc V</label>
@@ -114,6 +120,32 @@
             <div class="hint">默认 15 kHz × 512 点 · 通道 Id/Iq/I1/I2/I3</div>
           </div>
         </div>
+      </section>
+
+      
+      <section class="panel" id="panelCal" hidden>
+        <div class="plot-head">
+          <h2>编码器电角度标定</h2>
+        </div>
+        <p class="hint" style="margin-top:0">
+          参考 moteus：锁定 d 轴辨识 offset/sign，成功后自动写入运行时并保存到 Flash NVS（掉电保留）。
+          推荐先用「锁定校准」。
+        </p>
+        <label>校准电压 V</label>
+        <input id="calV" type="number" step="0.1" value="1.5" />
+        <label>转圈 |ω| elec (rad/s) — 仅转圈模式</label>
+        <input id="calOmega" type="number" step="1" value="40" />
+        <div class="row" style="margin-top:0.8rem">
+          <button id="btnCalLock" type="button">锁定校准（推荐）</button>
+          <button class="ghost" id="btnCalSpin" type="button">转圈校准</button>
+          <button class="stop" id="btnCalAbort" type="button">中止</button>
+        </div>
+        <div class="status" id="calStatus">idle</div>
+        <div class="calProgressWrap">
+          <div class="calProgressBar" id="calProgressBar"></div>
+        </div>
+        <div class="status" id="calVerdict">等待校准结果…</div>
+        <pre class="infoBox" id="calResult">尚无结果</pre>
       </section>
 
       <section class="panel log-panel">

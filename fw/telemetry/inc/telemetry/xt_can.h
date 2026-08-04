@@ -20,6 +20,9 @@ inline constexpr uint8_t kTypeInfo = 4;
 inline constexpr uint8_t kTypeSnapMeta = 5;
 inline constexpr uint8_t kTypeSnapData = 6;
 inline constexpr uint8_t kTypeEnc = 7;
+inline constexpr uint8_t kTypeCal = 8;
+// moteus-style control reply (cmd/query → one merged Live frame).
+inline constexpr uint8_t kTypeCtrlReply = 9;
 
 inline constexpr uint8_t kCmdStop = 0;
 inline constexpr uint8_t kCmdDq = 1;
@@ -27,11 +30,28 @@ inline constexpr uint8_t kCmdVfoc = 2;
 inline constexpr uint8_t kCmdRaw = 3;
 inline constexpr uint8_t kCmdInfo = 4;
 inline constexpr uint8_t kCmdSnap = 5;
+// moteus-style velocity: position=NaN + ω_mech (PID → Iq).
+inline constexpr uint8_t kCmdVel = 6;
+// Calibration: subcmd + args (see CalRequest).
+inline constexpr uint8_t kCmdCal = 7;
+// Idle poll: no mode change, reply with CtrlReply.
+inline constexpr uint8_t kCmdQuery = 8;
 
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
-inline constexpr uint8_t kFwMinor = 2;
-inline constexpr uint8_t kFwPatch = 0;
+inline constexpr uint8_t kFwMinor = 4;
+inline constexpr uint8_t kFwPatch = 2;
+
+// Commands that answer with CtrlReply instead of ACK.
+inline constexpr bool UsesCtrlReply(uint8_t cmd)
+{
+  return cmd == kCmdStop || cmd == kCmdDq || cmd == kCmdVfoc ||
+         cmd == kCmdRaw || cmd == kCmdVel || cmd == kCmdQuery;
+}
+
+inline constexpr uint8_t kCalSubAbort = 0;
+inline constexpr uint8_t kCalSubEncPhase = 1;  // spin both ways
+inline constexpr uint8_t kCalSubEncLock = 2;   // hold Vd, ω=0 (recommended)
 
 inline constexpr uint8_t kStatusOk = 0;
 inline constexpr uint8_t kStatusBadLen = 1;
@@ -54,11 +74,22 @@ inline constexpr uint16_t kFlagCisr = 1u << 1;
 inline constexpr uint16_t kFlagDqValid = 1u << 2;
 inline constexpr uint16_t kFlagFault = 1u << 3;
 inline constexpr uint16_t kFlagEncOk = 1u << 4;
+inline constexpr uint16_t kFlagEncMode = 1u << 5;
 
 inline constexpr uint8_t kModeStop = 0;
 inline constexpr uint8_t kModeRaw = 1;
 inline constexpr uint8_t kModeVfoc = 2;
 inline constexpr uint8_t kModeDq = 3;
+inline constexpr uint8_t kModeVel = 4;
+inline constexpr uint8_t kModeCal = 5;
+
+inline constexpr uint8_t kCalStateIdle = 0;
+inline constexpr uint8_t kCalStateSense = 1;
+inline constexpr uint8_t kCalStateFwd = 2;
+inline constexpr uint8_t kCalStateRev = 3;
+inline constexpr uint8_t kCalStateDone = 4;
+inline constexpr uint8_t kCalStateFailed = 5;
+inline constexpr uint8_t kCalStateLocking = 6;
 
 // Snapshot (PWM-rate burst). Channels packed as int16 mA in order:
 // Id, Iq, I1, I2, I3 when mask == kSnapChDefault.
@@ -144,6 +175,55 @@ struct EncTelem
   uint8_t reserved[2];
 } __attribute__((packed));
 
+// Device -> host reply to Query/Stop/Dq/Vel/Vfoc/Raw (replaces free-running Tel).
+// seq echoes the command seq. Live Id/Iq + encoder in one FD frame.
+struct CtrlReply
+{
+  Header hdr;
+  uint8_t cmd;
+  uint8_t status;
+  uint16_t flags;
+  uint8_t mode;
+  uint8_t enc_ok;
+  int8_t enc_sign;
+  uint8_t reserved;
+  int32_t id_mA;
+  int32_t iq_mA;
+  int32_t idref_mA;
+  int32_t iqref_mA;
+  int32_t theta_elec_mrad;
+  int32_t omega_mech_mrad_s;
+  int32_t vd_mV;
+  int32_t vq_mV;
+  uint16_t bus_mV;
+  uint16_t enc_raw;
+  int32_t theta_mech_mrad;
+  int32_t reserved2;
+} __attribute__((packed));
+
+// Host -> device: after cmd byte for kCmdCal.
+struct CalRequest
+{
+  uint8_t subcmd;        // kCalSub*
+  uint8_t reserved;
+  int32_t voltage_mV;    // encoder-phase open-loop V
+  int32_t omega_elec_mrad_s;
+} __attribute__((packed));
+
+// Device -> host calibration status / result.
+struct CalTelem
+{
+  Header hdr;
+  uint8_t kind;          // kCalSub*
+  uint8_t state;         // kCalState*
+  uint16_t progress_pm;  // 0..1000
+  int32_t offset_mrad;   // mechanical
+  int32_t residual_mrad;
+  int8_t sign;
+  uint8_t ok;
+  uint16_t samples;
+} __attribute__((packed));
+
 // Host -> device: after cmd byte.
 // n_samples (0 => 512), decimate (>=1), reserved, channel_mask (v1: ignore, use default).
 struct SnapRequest
@@ -186,6 +266,11 @@ static_assert(sizeof(Info) == 34, "Info size");
 static_assert(sizeof(Telemetry) == 60, "Telemetry size");
 // hdr4 + raw2 + mech4 + elec4 + sign1 + ok1 + pad2 = 18
 static_assert(sizeof(EncTelem) == 18, "EncTelem size");
+// hdr4 + cmd/status/flags/mode/enc + currents + angles/V + bus/raw + mech + pad = 56
+static_assert(sizeof(CtrlReply) == 56, "CtrlReply size");
+static_assert(sizeof(CalRequest) == 10, "CalRequest size");
+// hdr4 + kind1 + state1 + pm2 + offset4 + resid4 + sign1 + ok1 + samples2 = 20
+static_assert(sizeof(CalTelem) == 20, "CalTelem size");
 static_assert(sizeof(SnapRequest) == 6, "SnapRequest size");
 static_assert(sizeof(SnapMeta) == 16, "SnapMeta size");
 // hdr4 + idx2 + n1 + r1 + 5*5*i16 = 8 + 50 = 58

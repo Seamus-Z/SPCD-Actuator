@@ -16,6 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from collections import deque
 from queue import Empty, Queue
 from contextlib import redirect_stderr
 from io import StringIO
@@ -27,6 +28,7 @@ sys.path.insert(0, str(HOST_ROOT))
 
 from xt_proto import (  # noqa: E402
     CMD_INFO,
+    CMD_QUERY,
     CMD_SNAP,
     SNAP_CHANNEL_KEYS,
     SNAP_CHANNELS,
@@ -34,12 +36,20 @@ from xt_proto import (  # noqa: E402
     STATUS_OK,
     STATUS_NOT_RUN,
     Ack,
+    CalTelem,
+    CtrlReply,
     EncTelem,
     Info,
     SnapData,
     SnapMeta,
     Telemetry,
     pack_dq,
+    pack_query,
+    pack_cal_abort,
+    pack_cal_enc,
+    pack_cal_lock,
+    pack_raw,
+    pack_vel,
     pack_info,
     pack_snap,
     pack_stop,
@@ -59,12 +69,28 @@ _CMD_NAMES = {
     3: "raw",
     4: "info",
     5: "snap",
+    6: "vel",
+    7: "cal",
+    8: "query",
+}
+
+
+_CAL_STATE_NAMES = {
+    0: "idle",
+    1: "sense",
+    2: "fwd",
+    3: "rev",
+    4: "done",
+    5: "failed",
+    6: "locking",
 }
 _MODE_NAMES = {
     0: "stop",
     1: "raw",
     2: "vfoc",
     3: "dq",
+    4: "vel",
+    5: "cal",
 }
 
 
@@ -112,6 +138,24 @@ class MsgLog:
                 f"Id={t.id_a:+.3f}/{t.idref_a:+.3f} "
                 f"Iq={t.iq_a:+.3f}/{t.iqref_a:+.3f} "
                 f"cisr={int(t.cisr)} pwm={int(t.pwm_on)}"
+            ),
+        )
+
+    def maybe_ctrl(self, r: CtrlReply, period_s: float = 0.2):
+        now = time.monotonic()
+        if now - self._last_telem_log < period_s:
+            return
+        self._last_telem_log = now
+        mode = _MODE_NAMES.get(r.mode, str(r.mode))
+        cname = _CMD_NAMES.get(r.cmd, str(r.cmd))
+        self.push(
+            "RX",
+            (
+                f"REPLY cmd={cname} seq={r.seq} st={r.status} mode={mode} "
+                f"Id={r.id_a:+.3f}/{r.idref_a:+.3f} "
+                f"Iq={r.iq_a:+.3f}/{r.iqref_a:+.3f} "
+                f"ω={r.omega_mech_rad_s:+.2f} enc={r.enc_raw} "
+                f"cisr={int(r.cisr)} pwm={int(r.pwm_on)}"
             ),
         )
 
@@ -265,15 +309,27 @@ class CanBridge:
         self._lock = threading.Lock()
         self.latest: Telemetry | None = None
         self.latest_enc: EncTelem | None = None
+        self.latest_cal: CalTelem | None = None
         self.motor_ok = False
         self.motor_error: str | None = None
         self.info: Info | None = None
         self._acks: Queue = Queue()
+        self._replies: Queue = Queue(maxsize=8)
         self._infos: Queue = Queue()
         self._snap_metas: Queue = Queue()
         self._snap_datas: Queue = Queue()
         self._rx_stop = threading.Event()
         self._rx_thread: threading.Thread | None = None
+        self._stream_stop = threading.Event()
+        self._stream_thread: threading.Thread | None = None
+        self._stream_op = "query"
+        self._stream_args: dict = {}
+        self._stream_hz = 50.0
+        self._telem_ring: deque[dict] = deque(maxlen=256)
+        self._telem_sid = 0
+        self._rx_count = 0
+        self._rx_window_t0 = time.monotonic()
+        self._rx_hz = 0.0
         self.msglog = MsgLog()
         self.last_snap: dict | None = None
 
@@ -329,6 +385,12 @@ class CanBridge:
             self.interface = interface
             self.latest = None
             self.latest_enc = None
+            self.latest_cal = None
+            self._telem_ring.clear()
+            self._telem_sid = 0
+            self._rx_count = 0
+            self._rx_window_t0 = time.monotonic()
+            self._rx_hz = 0.0
             self.motor_ok = False
             self.motor_error = None
             self.info = None
@@ -336,6 +398,8 @@ class CanBridge:
         self._rx_stop.clear()
         self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx_thread.start()
+        self.set_stream("query")
+        self._start_stream_loop()
         self.msglog.push("SYS", f"CAN bus open: {interface} node={self.node_id}")
 
         probe = self.probe_motor(timeout=1.5)
@@ -398,6 +462,7 @@ class CanBridge:
         }
 
     def disconnect(self) -> dict:
+        self._stop_stream_loop()
         self._rx_stop.set()
         thread = self._rx_thread
         if thread is not None and thread.is_alive():
@@ -409,6 +474,12 @@ class CanBridge:
             self.interface = None
             self.latest = None
             self.latest_enc = None
+            self.latest_cal = None
+            self._telem_ring.clear()
+            self._telem_sid = 0
+            self._rx_count = 0
+            self._rx_window_t0 = time.monotonic()
+            self._rx_hz = 0.0
             self.motor_ok = False
             self.motor_error = None
             self.info = None
@@ -427,7 +498,7 @@ class CanBridge:
         }
 
     def _drain_queues(self):
-        for q in (self._acks, self._infos, self._snap_metas, self._snap_datas):
+        for q in (self._acks, self._replies, self._infos, self._snap_metas, self._snap_datas):
             while True:
                 try:
                     q.get_nowait()
@@ -435,8 +506,9 @@ class CanBridge:
                     break
 
     def _next_seq(self) -> int:
-        self._seq = (self._seq + 1) & 0xFF
-        return self._seq
+        with self._lock:
+            self._seq = (self._seq + 1) & 0xFF
+            return self._seq
 
     def _rx_loop(self):
         want = tel_id(self.node_id)
@@ -452,13 +524,41 @@ class CanBridge:
             if frame is None or frame.arbitration_id != want:
                 continue
             msg = parse_frame(bytes(frame.data))
-            if isinstance(msg, Telemetry):
+            if isinstance(msg, CtrlReply):
+                telem = msg.as_telemetry()
+                enc = msg.as_enc()
+                with self._lock:
+                    self.latest = telem
+                    self.latest_enc = enc
+                    cal = self.latest_cal
+                    sample = self._live_dict_locked(
+                        telem, enc, cal, omega_cmd=msg.omega_cmd_rad_s
+                    )
+                    self._push_live_sample(sample)
+                self.msglog.maybe_ctrl(msg)
+                try:
+                    self._replies.put_nowait(msg)
+                except Exception:  # noqa: BLE001
+                    try:
+                        self._replies.get_nowait()
+                    except Empty:
+                        pass
+                    try:
+                        self._replies.put_nowait(msg)
+                    except Exception:  # noqa: BLE001
+                        pass
+            elif isinstance(msg, Telemetry):
                 with self._lock:
                     self.latest = msg
+                    sample = self._live_dict_locked(msg, self.latest_enc, self.latest_cal)
+                    self._push_live_sample(sample)
                 self.msglog.maybe_telem(msg)
             elif isinstance(msg, EncTelem):
                 with self._lock:
                     self.latest_enc = msg
+            elif isinstance(msg, CalTelem):
+                with self._lock:
+                    self.latest_cal = msg
             elif isinstance(msg, Ack):
                 name = _CMD_NAMES.get(msg.cmd, str(msg.cmd))
                 self.msglog.push(
@@ -505,6 +605,103 @@ class CanBridge:
                 data=payload,
             )
         )
+
+
+    def set_stream(self, op: str, **args):
+        with self._lock:
+            self._stream_op = op
+            self._stream_args = dict(args)
+
+    def _start_stream_loop(self):
+        self._stop_stream_loop()
+        self._stream_stop.clear()
+        self._stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
+        self._stream_thread.start()
+
+    def _stop_stream_loop(self):
+        self._stream_stop.set()
+        th = self._stream_thread
+        self._stream_thread = None
+        if th is not None and th.is_alive():
+            th.join(timeout=1.0)
+
+    def _pack_stream_frame(self, op: str, args: dict, seq: int) -> bytes:
+        if op == "query":
+            return pack_query(seq)
+        if op == "stop":
+            return pack_stop(seq)
+        if op == "dq":
+            return pack_dq(
+                float(args.get("id", 0)),
+                float(args.get("iq", 0)),
+                float(args.get("omega", 0)),
+                seq,
+            )
+        if op == "vfoc":
+            return pack_vfoc(
+                float(args.get("theta", 0)),
+                float(args.get("v", 0)),
+                float(args.get("omega", 0)),
+                seq,
+            )
+        if op == "vel":
+            return pack_vel(
+                float(args.get("omega_mech", 0)),
+                float(args.get("id", 0)),
+                seq,
+            )
+        if op == "raw":
+            return pack_raw(
+                int(args.get("a", 0)),
+                int(args.get("b", 0)),
+                int(args.get("c", 0)),
+                seq,
+            )
+        return pack_query(seq)
+
+    def _stream_loop(self):
+        period = 1.0 / max(1.0, float(self._stream_hz))
+        next_t = time.monotonic()
+        while not self._stream_stop.is_set():
+            with self._lock:
+                bus = self.bus
+                op = self._stream_op
+                args = dict(self._stream_args)
+            if bus is not None:
+                try:
+                    seq = self._next_seq()
+                    payload = self._pack_stream_frame(op, args, seq)
+                    # Avoid console spam at 50 Hz.
+                    self._send_raw(payload, log=False)
+                    if op == "stop":
+                        # One stop is enough; fall back to query keep-alive.
+                        self.set_stream("query")
+                except Exception as exc:  # noqa: BLE001
+                    self.msglog.push("ERR", f"stream TX failed: {exc}")
+                    time.sleep(0.05)
+            next_t += period
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                # Wake early if stopped.
+                self._stream_stop.wait(timeout=delay)
+            else:
+                next_t = time.monotonic()
+
+    def send_ctrl(self, payload: bytes, timeout: float = 1.0) -> CtrlReply:
+        """Send a CtrlReply-style command and wait for matching reply."""
+        self._drain_queues()
+        seq = payload[3] if len(payload) > 3 else -1
+        self._send_raw(payload)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                msg = self._replies.get(timeout=0.05)
+            except Empty:
+                continue
+            if seq < 0 or msg.seq == seq:
+                return msg
+        self.msglog.push("ERR", "timeout waiting for CtrlReply")
+        raise TimeoutError("no CtrlReply")
 
     def send_cmd(self, payload: bytes, timeout: float = 1.0) -> Ack:
         self._drain_queues()
@@ -684,40 +881,30 @@ class CanBridge:
         )
         return result
 
-    def telem_dict(self):
-        motor = self._motor_snapshot()
-        with self._lock:
-            connected = self.bus is not None
-            interface = self.interface
-            t = self.latest
-            enc = self.latest_enc
-        if not connected:
-            return {
-                "ok": False,
-                "connected": False,
-                "error": "not connected",
-                "ports": scan_can_ports(),
-                **motor,
-            }
-        if t is None:
-            return {
-                "ok": False,
-                "connected": True,
-                "interface": interface,
-                "error": "no telemetry yet",
-                **motor,
-            }
+
+    def _live_dict_locked(self, t: Telemetry, enc: EncTelem | None, cal: CalTelem | None,
+                          omega_cmd: float | None = None) -> dict:
         enc_fields = {
             "enc_raw": enc.raw if enc else 0,
             "enc_theta_mech_rad": enc.theta_mech_rad if enc else 0.0,
             "enc_theta_elec_rad": enc.theta_elec_rad if enc else 0.0,
             "enc_sign": enc.sign if enc else 1,
             "enc_ok": bool(enc.ok) if enc else bool(getattr(t, "enc_ok", False)),
+            "enc_mode": bool(getattr(t, "enc_mode", False)),
         }
-        return {
-            "ok": True,
-            "connected": True,
-            "interface": interface,
+        cal_fields = {
+            "cal_kind": cal.kind if cal else 0,
+            "cal_state": cal.state if cal else 0,
+            "cal_state_name": _CAL_STATE_NAMES.get(cal.state if cal else 0, "idle"),
+            "cal_progress": cal.progress if cal else 0.0,
+            "cal_offset_rad": cal.offset_rad if cal else 0.0,
+            "cal_residual_rad": cal.residual_rad if cal else 0.0,
+            "cal_sign": cal.sign if cal else 1,
+            "cal_ok": bool(cal.ok) if cal else False,
+            "cal_samples": cal.sample_count if cal else 0,
+            "cal_persisted": bool(cal.persisted) if cal else False,
+        }
+        out = {
             "seq": t.seq,
             "flags": t.flags,
             "id_a": t.id_a,
@@ -729,6 +916,7 @@ class CanBridge:
             "i3_a": t.i3_a,
             "theta_rad": t.theta_rad,
             "omega_rad_s": t.omega_rad_s,
+            "omega_cmd_rad_s": float(omega_cmd) if omega_cmd is not None else t.omega_rad_s,
             "vd_v": t.vd_v,
             "vq_v": t.vq_v,
             "duty_a": t.duty_a,
@@ -739,6 +927,73 @@ class CanBridge:
             "pwm_on": t.pwm_on,
             "cisr": t.cisr,
             **enc_fields,
+            **cal_fields,
+        }
+        return out
+
+    def _push_live_sample(self, sample: dict):
+        self._telem_sid += 1
+        sample = dict(sample)
+        sample["_sid"] = self._telem_sid
+        sample["_t_mono"] = time.monotonic()
+        self._telem_ring.append(sample)
+        self._rx_count += 1
+        now = time.monotonic()
+        dt = now - self._rx_window_t0
+        if dt >= 0.5:
+            self._rx_hz = self._rx_count / dt
+            self._rx_count = 0
+            self._rx_window_t0 = now
+
+    def telem_dict(self, after_sid: int = 0):
+        motor = self._motor_snapshot()
+        with self._lock:
+            connected = self.bus is not None
+            interface = self.interface
+            t = self.latest
+            enc = self.latest_enc
+            cal = self.latest_cal
+            rx_hz = self._rx_hz
+            sid = self._telem_sid
+            if after_sid > 0:
+                samples = [s for s in self._telem_ring if s.get("_sid", 0) > after_sid]
+            else:
+                # First paint: only latest sample (avoid dumping whole ring).
+                samples = [self._telem_ring[-1]] if self._telem_ring else []
+        if not connected:
+            return {
+                "ok": False,
+                "connected": False,
+                "error": "not connected",
+                "ports": scan_can_ports(),
+                "rx_hz": 0.0,
+                "sid": 0,
+                "samples": [],
+                **motor,
+            }
+        if t is None:
+            return {
+                "ok": False,
+                "connected": True,
+                "interface": interface,
+                "error": "no telemetry yet",
+                "rx_hz": rx_hz,
+                "sid": sid,
+                "samples": [],
+                **motor,
+            }
+        latest = self._live_dict_locked(t, enc, cal)
+        # Prefer last ring sample (has omega_cmd) when present.
+        if samples:
+            latest = {**latest, **{k: v for k, v in samples[-1].items() if not k.startswith('_')}}
+        return {
+            "ok": True,
+            "connected": True,
+            "interface": interface,
+            "rx_hz": rx_hz,
+            "sid": sid,
+            "samples": samples,
+            **latest,
             **motor,
         }
 
@@ -788,7 +1043,10 @@ def make_handler(bridge: CanBridge):
             if "?" in self.path:
                 query = self.path.split("?", 1)[1]
             if path.startswith("/api/telem"):
-                self._json(200, bridge.telem_dict())
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                after = int((qs.get("after") or ["0"])[0] or 0)
+                self._json(200, bridge.telem_dict(after_sid=after))
                 return
             if path.startswith("/api/messages"):
                 after = 0
@@ -878,22 +1136,62 @@ def make_handler(bridge: CanBridge):
 
             op = req.get("op")
             try:
+                # Streamed control: host keeps sending; board replies CtrlReply.
                 if op == "stop":
-                    payload = pack_stop(bridge._next_seq())
-                elif op == "dq":
-                    payload = pack_dq(
-                        float(req.get("id", 0)),
-                        float(req.get("iq", 0)),
-                        float(req.get("omega", 0)),
+                    bridge.set_stream("stop")
+                    self._json(200, {"ok": True, "status": 0, "stream": "stop"})
+                    return
+                if op == "dq":
+                    bridge.set_stream(
+                        "dq",
+                        id=float(req.get("id", 0)),
+                        iq=float(req.get("iq", 0)),
+                        omega=float(req.get("omega", 0)),
+                    )
+                    self._json(200, {"ok": True, "status": 0, "stream": "dq"})
+                    return
+                if op == "vfoc":
+                    bridge.set_stream(
+                        "vfoc",
+                        theta=float(req.get("theta", 0)),
+                        v=float(req.get("v", 0)),
+                        omega=float(req.get("omega", 0)),
+                    )
+                    self._json(200, {"ok": True, "status": 0, "stream": "vfoc"})
+                    return
+                if op == "vel":
+                    bridge.set_stream(
+                        "vel",
+                        omega_mech=float(req.get("omega_mech", 0)),
+                        id=float(req.get("id", 0)),
+                    )
+                    self._json(200, {"ok": True, "status": 0, "stream": "vel"})
+                    return
+                if op == "raw":
+                    bridge.set_stream(
+                        "raw",
+                        a=int(req.get("a", 0)),
+                        b=int(req.get("b", 0)),
+                        c=int(req.get("c", 0)),
+                    )
+                    self._json(200, {"ok": True, "status": 0, "stream": "raw"})
+                    return
+                if op == "cal_enc":
+                    bridge.set_stream("query")
+                    payload = pack_cal_enc(
+                        float(req.get("voltage", 1.5)),
+                        float(req.get("omega_elec", 40)),
                         bridge._next_seq(),
                     )
-                elif op == "vfoc":
-                    payload = pack_vfoc(
-                        float(req.get("theta", 0)),
-                        float(req.get("v", 0)),
-                        float(req.get("omega", 0)),
+                elif op == "cal_lock":
+                    bridge.set_stream("query")
+                    payload = pack_cal_lock(
+                        float(req.get("voltage", 1.5)),
                         bridge._next_seq(),
                     )
+                elif op == "cal_abort":
+                    bridge.set_stream("query")
+                    payload = pack_cal_abort(bridge._next_seq())
                 elif op == "info":
                     self._json(200, {"ok": True, **bridge.probe_motor()})
                     return

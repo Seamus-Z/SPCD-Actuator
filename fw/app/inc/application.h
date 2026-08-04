@@ -9,8 +9,11 @@
 #include "app_state.h"
 #include "binary_commands.h"
 #include "device/drv8353s.h"
+#include "calibration/encoder_phase.h"
 #include "device/ma600.h"
 #include "foc_ctrl/current_loop.h"
+#include "foc_ctrl/encoder_pll.h"
+#include "foc_ctrl/position_loop.h"
 #include "foc_ctrl/voltage_foc.h"
 #include "pool/pool.h"
 #include "snapshot_capture.h"
@@ -52,6 +55,8 @@ class Application
   void EnterBootloaderMode();
   void PollCan();
   void MaybeSendTelemetry();
+  void MaybeCommandTimeout();
+  void ReplyCtrl(uint8_t cmd, uint8_t seq, uint8_t status);
   void MaybeSendSnapshot();
   void StopOutput();
   void StartControlIsr();
@@ -63,7 +68,13 @@ class Application
 
   telemetry::xt_can::Telemetry BuildTelemetry() const;
   telemetry::xt_can::EncTelem BuildEncTelem() const;
+  telemetry::xt_can::CalTelem BuildCalTelem() const;
+  telemetry::xt_can::CtrlReply BuildCtrlReply(uint8_t cmd, uint8_t seq,
+                                             uint8_t status) const;
   void SampleEncoder();
+  void ApplyEncoderCalResult();
+  void PersistEncoderCalResult();
+  void UpdateEncoderPll(float dt_s);
 
   State state_ = State::INIT;
   ::pool::Pool* pool_ = nullptr;
@@ -75,8 +86,17 @@ class Application
   float iq_A_ = 0.0f;
   float enc_theta_mech_rad_ = 0.0f;
   float enc_theta_elec_rad_ = 0.0f;
+  float enc_counts_rad_ = 0.0f;
+  float cal_last_omega_cmd_ = 0.0f;
+  bool encoder_cal_dirty_ = false;
+  bool encoder_cal_persisted_ = false;
+  calibration::EncoderPhaseCal encoder_cal_{};
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType telem_last_us_ = 0;
+  hal::MillisecondTimer::TimerType last_rx_us_ = 0;
+  // Last ControlIsrStep timestamp; 0 = use PWM nominal dt next time.
+  hal::MillisecondTimer::TimerType last_control_us_ = 0;
+  uint8_t enc_telem_div_ = 0;
   SnapshotCapture snapshot_{};
   uint8_t snap_seq_ = 0;
   bool snap_meta_sent_ = false;
@@ -88,6 +108,8 @@ class Application
   ::pool::PoolPtr<hal::PhasePwm> phase_pwm_;
   ::pool::PoolPtr<foc_ctrl::VoltageFoc> voltage_foc_;
   ::pool::PoolPtr<foc_ctrl::CurrentLoop> current_loop_;
+  foc_ctrl::EncoderPll encoder_pll_;
+  ::pool::PoolPtr<foc_ctrl::PositionLoop> position_loop_;
   ::pool::PoolPtr<device::Ma600> ma600_;
   ::pool::PoolPtr<telemetry::BinaryLink> binary_link_;
   BinaryCommands commands_;

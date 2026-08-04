@@ -340,9 +340,12 @@ bool FDCan::Send(uint32_t dest_id, std::string_view data)
 
 bool FDCan::Send(uint32_t dest_id, std::string_view data, const SendOptions& send_options)
 {
-  if (last_tx_request_)
+  // Queue into TX FIFO. Aborting the previous request (moteus default for
+  // replacing a stale control frame) would drop Telemetry when EncTelem is
+  // sent immediately after — Live looks "stuttery". If FIFO is full, fail.
+  if (HAL_FDCAN_GetTxFifoFreeLevel(&handle_) == 0U)
   {
-    HAL_FDCAN_AbortTxRequest(&handle_, last_tx_request_);
+    return false;
   }
 
   FDCAN_TxHeaderTypeDef tx_header = {};

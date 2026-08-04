@@ -15,6 +15,8 @@ TYPE_INFO = 4
 TYPE_SNAP_META = 5
 TYPE_SNAP_DATA = 6
 TYPE_ENC = 7
+TYPE_CAL = 8
+TYPE_CTRL_REPLY = 9
 
 CMD_STOP = 0
 CMD_DQ = 1
@@ -22,6 +24,13 @@ CMD_VFOC = 2
 CMD_RAW = 3
 CMD_INFO = 4
 CMD_SNAP = 5
+CMD_VEL = 6
+CMD_CAL = 7
+CMD_QUERY = 8
+
+CAL_SUB_ABORT = 0
+CAL_SUB_ENC_PHASE = 1
+CAL_SUB_ENC_LOCK = 2
 
 STATUS_OK = 0
 STATUS_BAD_LEN = 1
@@ -40,11 +49,14 @@ FLAG_CISR = 1 << 1
 FLAG_DQ_VALID = 1 << 2
 FLAG_FAULT = 1 << 3
 FLAG_ENC_OK = 1 << 4
+FLAG_ENC_MODE = 1 << 5
 
 MODE_STOP = 0
 MODE_RAW = 1
 MODE_VFOC = 2
 MODE_DQ = 3
+MODE_VEL = 4
+MODE_CAL = 5
 
 
 def cmd_id(node_id: int = 1) -> int:
@@ -61,6 +73,10 @@ def pack_header(msg_type: int, seq: int) -> bytes:
 
 def pack_stop(seq: int = 0) -> bytes:
     return pack_header(TYPE_CMD, seq) + struct.pack("<B", CMD_STOP)
+
+
+def pack_query(seq: int = 0) -> bytes:
+    return pack_header(TYPE_CMD, seq) + struct.pack("<B", CMD_QUERY)
 
 
 def pack_info(seq: int = 0) -> bytes:
@@ -90,6 +106,56 @@ def pack_dq(id_a: float, iq_a: float, omega_rad_s: float, seq: int = 0) -> bytes
         int(round(id_a * 1000)),
         int(round(iq_a * 1000)),
         int(round(omega_rad_s * 1000)),
+    )
+
+
+def pack_vel(omega_mech_rad_s: float, id_a: float = 0.0, seq: int = 0) -> bytes:
+    """moteus-style velocity: position=NaN + ω_mech [rad/s], optional Id."""
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<Bii",
+        CMD_VEL,
+        int(round(omega_mech_rad_s * 1000)),
+        int(round(id_a * 1000)),
+    )
+
+
+
+def pack_cal_enc(
+    voltage_v: float = 1.5,
+    omega_elec_rad_s: float = 40.0,
+    seq: int = 0,
+) -> bytes:
+    """Start encoder spin calibration (both directions)."""
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_ENC_PHASE,
+        0,
+        int(round(voltage_v * 1000)),
+        int(round(omega_elec_rad_s * 1000)),
+    )
+
+
+def pack_cal_lock(voltage_v: float = 1.5, seq: int = 0) -> bytes:
+    """Start encoder lock calibration (hold Vd, omega=0) — recommended."""
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_ENC_LOCK,
+        0,
+        int(round(voltage_v * 1000)),
+        0,
+    )
+
+
+def pack_cal_abort(seq: int = 0) -> bytes:
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_ABORT,
+        0,
+        0,
+        0,
     )
 
 
@@ -172,6 +238,75 @@ class SnapData:
     samples_mA: list
 
 
+
+@dataclass
+class CtrlReply:
+    seq: int
+    cmd: int
+    status: int
+    flags: int
+    mode: int
+    enc_ok: bool
+    enc_sign: int
+    id_a: float
+    iq_a: float
+    idref_a: float
+    iqref_a: float
+    theta_elec_rad: float
+    omega_mech_rad_s: float
+    vd_v: float
+    vq_v: float
+    bus_v: float
+    enc_raw: int
+    theta_mech_rad: float
+    omega_cmd_rad_s: float = 0.0
+
+    @property
+    def pwm_on(self) -> bool:
+        return bool(self.flags & FLAG_PWM_ON)
+
+    @property
+    def cisr(self) -> bool:
+        return bool(self.flags & FLAG_CISR)
+
+    @property
+    def enc_mode(self) -> bool:
+        return bool(self.flags & FLAG_ENC_MODE)
+
+    def as_telemetry(self) -> "Telemetry":
+        """Adapt to legacy Telemetry fields for GUI /api/telem."""
+        return Telemetry(
+            seq=self.seq,
+            flags=self.flags,
+            id_a=self.id_a,
+            iq_a=self.iq_a,
+            idref_a=self.idref_a,
+            iqref_a=self.iqref_a,
+            i1_a=0.0,
+            i2_a=0.0,
+            i3_a=0.0,
+            theta_rad=self.theta_elec_rad,
+            omega_rad_s=self.omega_mech_rad_s,
+            vd_v=self.vd_v,
+            vq_v=self.vq_v,
+            duty_a=0,
+            duty_b=0,
+            duty_c=0,
+            bus_v=self.bus_v,
+            mode=self.mode,
+        )
+
+    def as_enc(self) -> "EncTelem":
+        return EncTelem(
+            seq=self.seq,
+            raw=self.enc_raw,
+            theta_mech_rad=self.theta_mech_rad,
+            theta_elec_rad=self.theta_elec_rad,
+            sign=self.enc_sign,
+            ok=self.enc_ok,
+        )
+
+
 @dataclass
 class Telemetry:
     seq: int
@@ -205,6 +340,10 @@ class Telemetry:
     def enc_ok(self) -> bool:
         return bool(self.flags & FLAG_ENC_OK)
 
+    @property
+    def enc_mode(self) -> bool:
+        return bool(self.flags & FLAG_ENC_MODE)
+
 
 @dataclass
 class EncTelem:
@@ -214,6 +353,27 @@ class EncTelem:
     theta_elec_rad: float
     sign: int
     ok: bool
+
+
+@dataclass
+class CalTelem:
+    seq: int
+    kind: int
+    state: int
+    progress: float  # 0..1
+    offset_rad: float
+    residual_rad: float
+    sign: int
+    ok: bool
+    samples: int  # low15=count, bit15=persisted flash write ok
+
+    @property
+    def sample_count(self) -> int:
+        return self.samples & 0x7FFF
+
+    @property
+    def persisted(self) -> bool:
+        return bool(self.samples & 0x8000)
 
 
 _TELEM_FMT = "<BBBBHiiiiiiiiiiiHHHHBB"
@@ -231,6 +391,12 @@ assert struct.calcsize(_SNAP_META_FMT) == 16
 # hdr4 + raw u16 + mech i32 + elec i32 + sign i8 + ok u8 + pad2 = 18
 _ENC_FMT = "<BBBBHiibBxx"
 assert struct.calcsize(_ENC_FMT) == 18
+_CAL_FMT = "<BBBBBBHiibBH"
+assert struct.calcsize(_CAL_FMT) == 20
+
+# hdr4 + cmd/status + flags + mode/enc + 4*i32 I + 4*i32 ang/V + bus/raw + mech + pad = 56
+_CTRL_FMT = "<BBBBBBHBBbBiiiiiiiiHHii"
+assert struct.calcsize(_CTRL_FMT) == 56
 
 
 def parse_frame(data: bytes) -> Optional[object]:
@@ -311,5 +477,41 @@ def parse_frame(data: bytes) -> Optional[object]:
             theta_elec_rad=fields[6] / 1000.0,
             sign=fields[7],
             ok=bool(fields[8]),
+        )
+    if typ == TYPE_CTRL_REPLY and len(data) >= 56:
+        fields = struct.unpack_from(_CTRL_FMT, data, 0)
+        return CtrlReply(
+            seq=fields[3],
+            cmd=fields[4],
+            status=fields[5],
+            flags=fields[6],
+            mode=fields[7],
+            enc_ok=bool(fields[8]),
+            enc_sign=fields[9],
+            id_a=fields[11] / 1000.0,
+            iq_a=fields[12] / 1000.0,
+            idref_a=fields[13] / 1000.0,
+            iqref_a=fields[14] / 1000.0,
+            theta_elec_rad=fields[15] / 1000.0,
+            omega_mech_rad_s=fields[16] / 1000.0,
+            vd_v=fields[17] / 1000.0,
+            vq_v=fields[18] / 1000.0,
+            bus_v=fields[19] / 1000.0,
+            enc_raw=fields[20],
+            theta_mech_rad=fields[21] / 1000.0,
+            omega_cmd_rad_s=fields[22] / 1000.0,
+        )
+    if typ == TYPE_CAL and len(data) >= 20:
+        fields = struct.unpack_from(_CAL_FMT, data, 0)
+        return CalTelem(
+            seq=fields[3],
+            kind=fields[4],
+            state=fields[5],
+            progress=fields[6] / 1000.0,
+            offset_rad=fields[7] / 1000.0,
+            residual_rad=fields[8] / 1000.0,
+            sign=fields[9],
+            ok=bool(fields[10]),
+            samples=fields[11],
         )
     return None

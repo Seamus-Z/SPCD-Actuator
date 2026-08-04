@@ -46,6 +46,9 @@ class VoltageFoc
 
   void Stop() { active_ = false; }
 
+  void SetThetaRate(float theta_rate_rad_s) { theta_rate_ = theta_rate_rad_s; }
+  void SetVoltage(float voltage_V) { voltage_ = voltage_V; }
+
   bool active() const { return active_; }
   float theta_rad() const { return theta_; }
   float voltage_V() const { return voltage_; }
