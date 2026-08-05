@@ -20,6 +20,16 @@ APP_START = 0x08010000
 BOOT_REQUEST_ID = 0x7E
 BOOT_REQUEST_PAYLOAD = b"BOOT"
 
+FLASH_PAGE_SIZE = 2048
+WRITE_SIZE = 8
+WRITE_TIMEOUT_S = 10.0
+RESPONSE_POLL_INTERVAL_S = 0.5
+WRITE_SETTLE_DELAY_S = 0.05
+PAGE_ERASE_SETTLE_DELAY_S = 0.25
+PAGE_WRITE_ATTEMPTS = 5
+VERIFY_ATTEMPTS = 5
+POWER_RECOVERY_DELAY_S = 2.0
+
 
 def varuint_encode(value):
     result = bytearray()
@@ -160,7 +170,15 @@ class BootloaderClient:
         deadline = time.monotonic() + timeout
         result = bytearray()
         while time.monotonic() < deadline:
-            chunk = self.poll(timeout=max(0.1, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            try:
+                # A poll sent while Flash is busy can be lost by the target.
+                # Re-send read-only polls instead of waiting the full write
+                # timeout on one query.
+                chunk = self.poll(
+                    timeout=min(RESPONSE_POLL_INTERVAL_S, remaining))
+            except TimeoutError:
+                continue
             result += chunk
             if b"\n" in result:
                 line = bytes(result).strip()
@@ -172,32 +190,128 @@ class BootloaderClient:
             time.sleep(0.002)
         raise TimeoutError(f"no complete response to {text!r}")
 
+    def _recover_flash_session(self):
+        """Wait for a brownout reset, then restore an unlocked BL session."""
+        last_error = None
+        for attempt in range(1, PAGE_WRITE_ATTEMPTS + 1):
+            time.sleep(POWER_RECOVERY_DELAY_S)
+            try:
+                try:
+                    # A reset while page 0 is erased leaves the APP invalid,
+                    # so the target normally remains in the bootloader.
+                    self.drain_banner()
+                    response = self.command("echo ready", timeout=3.0)
+                except (TimeoutError, RuntimeError):
+                    # A reset on a later page can boot the still-valid APP.
+                    # Re-send the one-shot BOOT request and return to BL.
+                    self.enter()
+                    self.drain_banner()
+                    response = self.command("echo ready", timeout=5.0)
+                if response != b"ready":
+                    raise RuntimeError(
+                        f"unexpected bootloader echo: {response!r}")
+                self.command("unlock", timeout=5.0)
+                return
+            except (TimeoutError, RuntimeError) as error:
+                last_error = error
+                if self.verbose:
+                    print(
+                        f"bootloader recovery {attempt}/"
+                        f"{PAGE_WRITE_ATTEMPTS} failed: {error}")
+        raise RuntimeError(
+            "bootloader did not recover after a write failure") from last_error
+
+    def _write_page(self, page_offset, page, image_size):
+        """Write one erase page; retry the whole page after any interruption."""
+        for attempt in range(1, PAGE_WRITE_ATTEMPTS + 1):
+            if attempt > 1:
+                self._recover_flash_session()
+                if self.verbose:
+                    print(
+                        f"retrying flash page 0x{APP_START + page_offset:08x} "
+                        f"({attempt}/{PAGE_WRITE_ATTEMPTS})")
+            try:
+                for block_offset in range(0, len(page), WRITE_SIZE):
+                    block = page[block_offset:block_offset + WRITE_SIZE]
+                    address = APP_START + page_offset + block_offset
+                    self.command(
+                        f"w {address:08x} {block.hex()}",
+                        timeout=WRITE_TIMEOUT_S)
+                    # Flash programming current is bursty. Pace every command
+                    # so a marginal rail can recover instead of sagging after
+                    # dozens of back-to-back double-word programs.
+                    delay = (
+                        PAGE_ERASE_SETTLE_DELAY_S if block_offset == 0
+                        else WRITE_SETTLE_DELAY_S)
+                    time.sleep(delay)
+                    completed = min(
+                        page_offset + block_offset + len(block), image_size)
+                    self._progress("write", completed, image_size)
+                return
+            except (TimeoutError, RuntimeError) as error:
+                if self.verbose:
+                    print(
+                        f"\nflash page 0x{APP_START + page_offset:08x} "
+                        f"attempt {attempt}/{PAGE_WRITE_ATTEMPTS} failed: "
+                        f"{error}")
+                if attempt == PAGE_WRITE_ATTEMPTS:
+                    raise RuntimeError(
+                        f"failed to program flash page at "
+                        f"0x{APP_START + page_offset:08x}; repeated failure "
+                        "usually means the target supply is still sagging "
+                        "during Flash programming") from error
+
+    def _read_verified_block(self, address, expected):
+        last_error = None
+        for attempt in range(1, VERIFY_ATTEMPTS + 1):
+            try:
+                response = self.command(
+                    f"r {address:08x} {len(expected):x}", timeout=5.0)
+                fields = response.split()
+                if len(fields) != 2 or int(fields[0], 16) != address:
+                    raise RuntimeError(
+                        f"malformed read response at 0x{address:08x}")
+                actual = bytes.fromhex(fields[1].decode("ascii"))
+                if len(actual) != len(expected):
+                    raise RuntimeError(
+                        f"truncated read response at 0x{address:08x}")
+                if actual != expected:
+                    raise RuntimeError(
+                        f"verify failed at 0x{address:08x}")
+                return
+            except (TimeoutError, RuntimeError, ValueError) as error:
+                last_error = error
+                if attempt < VERIFY_ATTEMPTS:
+                    if self.verbose:
+                        print(
+                            f"\nverify retry {attempt}/"
+                            f"{VERIFY_ATTEMPTS} at 0x{address:08x}: {error}")
+                    time.sleep(0.1)
+        raise RuntimeError(
+            f"unable to verify flash at 0x{address:08x}") from last_error
+
     def flash(self, image):
         if not image:
             raise ValueError("application image is empty")
         if len(image) > 0x70000:
             raise ValueError("application image exceeds 448 KiB")
 
+        # Fully populate the final flash double-word so a brownout before
+        # "lock" cannot lose bytes buffered only in the bootloader's RAM.
+        padded_image = image + b"\xff" * ((-len(image)) % 8)
+
         self.command("unlock")
-        write_size = 24
-        for offset in range(0, len(image), write_size):
-            block = image[offset:offset + write_size]
-            self.command(f"w {APP_START + offset:08x} {block.hex()}")
-            self._progress("write", offset + len(block), len(image))
-        self.command("lock")  # also flushes a final partial double-word
+        for page_offset in range(0, len(padded_image), FLASH_PAGE_SIZE):
+            page = padded_image[page_offset:page_offset + FLASH_PAGE_SIZE]
+            self._write_page(page_offset, page, len(image))
+        self.command("lock", timeout=WRITE_TIMEOUT_S)
         print()
 
         read_size = 32
         for offset in range(0, len(image), read_size):
             expected = image[offset:offset + read_size]
             address = APP_START + offset
-            response = self.command(f"r {address:08x} {len(expected):x}")
-            fields = response.split()
-            if len(fields) != 2 or int(fields[0], 16) != address:
-                raise RuntimeError(f"malformed read response at 0x{address:08x}")
-            actual = bytes.fromhex(fields[1].decode("ascii"))
-            if actual != expected:
-                raise RuntimeError(f"verify failed at 0x{address:08x}")
+            self._read_verified_block(address, expected)
             self._progress("verify", offset + len(expected), len(image))
         print("\nFlash and verify complete; resetting into application")
         self.command("reset", expect_response=False)

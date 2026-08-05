@@ -6,6 +6,13 @@ set -euo pipefail
 CAN_IF="${1:-can0}"
 APP_BIN="bazel-bin/fw/app.bin"
 
+if pgrep -af 'tools/host/gui/web_server.py' >/dev/null; then
+  echo "ERROR: tools/host/gui/web_server.py is still running." >&2
+  pgrep -af 'tools/host/gui/web_server.py' >&2 || true
+  echo "Stop the host server before bootloading so it cannot compete for gs_usb." >&2
+  exit 1
+fi
+
 echo "=== Building application ==="
 tools/bazel build //fw:app_binary
 
@@ -18,7 +25,9 @@ sudo ip link set "${CAN_IF}" type can \
 sudo ip link set "${CAN_IF}" up
 
 echo "=== Updating ${APP_BIN} over ${CAN_IF} ==="
-echo "(Tip: stop tools/host/gui/web_server.py first — it floods RX and can block BOOT)"
+echo "(Tips: keep web_server.py stopped; use a stiff DC PSU — supply sag" \
+     "during Flash page erase can reset the target mid-write.)"
+sudo ip link set "${CAN_IF}" txqueuelen 1000 2>/dev/null || true
 tools/bootload_test.py \
   --interface "${CAN_IF}" \
   --flash "${APP_BIN}" \
