@@ -27,20 +27,22 @@ class EncoderPll
     RecomputeGains();
   }
 
-  void Reset(float theta_mech_rad)
+  void Reset(float theta_mech_rad, float electrical_correction_rad = 0.0f)
   {
     filtered_ = math::WrapZeroToTwoPi(theta_mech_rad);
     integral_ = 0.0f;
     velocity_ = 0.0f;
     position_ = filtered_;
-    electrical_theta_ =
-        math::WrapZeroToTwoPi(position_ * options_.pole_pairs);
+    electrical_correction_rad_ = electrical_correction_rad;
+    electrical_theta_ = math::WrapZeroToTwoPi(
+        position_ * options_.pole_pairs + electrical_correction_rad_);
     theta_valid_ = true;
     have_sample_ = true;
   }
 
   // Call every control period with calibrated mechanical angle [0, 2π).
-  void Update(float theta_mech_rad, float dt_s)
+  void Update(float theta_mech_rad, float dt_s,
+              float electrical_correction_rad = 0.0f)
   {
     if (dt_s < 1.0e-7f)
     {
@@ -50,7 +52,7 @@ class EncoderPll
 
     if (!have_sample_)
     {
-      Reset(measured);
+      Reset(measured, electrical_correction_rad);
       return;
     }
 
@@ -72,8 +74,9 @@ class EncoderPll
 
     // Commutation θ from continuous mech position (not wrapped filtered_*pp),
     // so electrical wrap is a pure 2π discontinuity for sin/cos only.
-    electrical_theta_ =
-        math::WrapZeroToTwoPi(position_ * options_.pole_pairs);
+    electrical_correction_rad_ = electrical_correction_rad;
+    electrical_theta_ = math::WrapZeroToTwoPi(
+        position_ * options_.pole_pairs + electrical_correction_rad_);
     theta_valid_ = true;
   }
 
@@ -115,6 +118,7 @@ class EncoderPll
   float velocity_ = 0.0f;
   float position_ = 0.0f;
   float electrical_theta_ = 0.0f;
+  float electrical_correction_rad_ = 0.0f;
   bool theta_valid_ = false;
   bool have_sample_ = false;
 };

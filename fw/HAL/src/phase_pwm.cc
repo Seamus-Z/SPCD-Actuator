@@ -77,7 +77,10 @@ void PhasePwm::ConfigureTimer()
   __HAL_RCC_TIM5_CLK_ENABLE();
 
   // Center-aligned mode 2: f_pwm = TIMCLK / (2 * ARR).
-  const uint32_t timclk = SystemCoreClock;
+  // TIM5 is on APB1; when the APB1 prescaler is > 1 the timer clock is
+  // doubled (2 * PCLK1), so do NOT use SystemCoreClock alone.
+  const uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
+  const uint32_t timclk = (pclk1 == SystemCoreClock) ? pclk1 : (2u * pclk1);
   arr_ = timclk / (2u * static_cast<uint32_t>(options_.rate_hz));
   if (arr_ < 2u)
   {

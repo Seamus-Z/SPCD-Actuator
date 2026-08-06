@@ -27,13 +27,20 @@ class CurrentLoop
     float kp_q = 0.35f;
     float ki_q = 0.015f * 15000.0f;
     float max_current_A = 4.9f;
+    float max_current_desired_rate_A_s = 0.0f;
     float resistance_ohm = 0.65f;
-    float inductance_H = 0.00034f;
+    float inductance_d_H = 0.00034f;
+    float inductance_q_H = 0.00034f;
     // BEMF feedforward scale: V / (mech rad/s), from Ke.
     float v_per_hz = 0.0f;  // name kept; units are V·s/rad mech
     float current_feedforward = 1.0f;
     float cross_coupling_feedforward = 1.0f;
     float bemf_feedforward = 1.0f;
+    // Commutation phase-lead: advance the OUTPUT angle by omega_elec *
+    // phase_lead_s to compensate the sample->apply + encoder group delay.
+    // The dq frame the voltage lands in then matches the rotor, which keeps
+    // the torque q-current from leaking into d at high speed. 0 = disabled.
+    float phase_lead_s = 0.0f;
   };
 
   struct Command
@@ -99,6 +106,34 @@ class CurrentLoop
     omega_rotor_ = omega_rotor_mech;
   }
 
+  // Runtime Ke override (e.g. from an on-device identification result).
+  void SetVPerHz(float v_per_hz) { options_.v_per_hz = v_per_hz; }
+
+  float resistance_ohm() const { return options_.resistance_ohm; }
+  float inductance_d_H() const { return options_.inductance_d_H; }
+  float inductance_q_H() const { return options_.inductance_q_H; }
+
+  // Runtime R/Ld/Lq override. Preserve the configured D-axis bandwidth and
+  // apply that bandwidth to both axes: kp_d=w*Ld, kp_q=w*Lq, ki=w*R.
+  void SetResistanceInductance(float resistance_ohm, float inductance_d_H,
+                               float inductance_q_H)
+  {
+    const float w = (options_.inductance_d_H > 1.0e-9f)
+                        ? (options_.kp_d / options_.inductance_d_H)
+                        : 0.0f;
+    options_.resistance_ohm = resistance_ohm;
+    options_.inductance_d_H = inductance_d_H;
+    options_.inductance_q_H = inductance_q_H;
+    if (w > 0.0f)
+    {
+      options_.kp_d = w * inductance_d_H;
+      options_.kp_q = w * inductance_q_H;
+      options_.ki_d = w * resistance_ohm;
+      options_.ki_q = w * resistance_ohm;
+      SyncPiConfig();
+    }
+  }
+
   bool active() const { return active_; }
   float theta_rad() const { return theta_; }
   float theta_rate_rad_s() const { return theta_rate_; }
@@ -109,6 +144,16 @@ class CurrentLoop
   float vd_V() const { return vd_V_; }
   float vq_V() const { return vq_V_; }
   float bus_V() const { return options_.bus_V; }
+  float max_voltage_V() const
+  {
+    return (0.5f - options_.min_duty) * options_.bus_V * math::kSvpwmRatio;
+  }
+  float voltage_headroom_V() const
+  {
+    const float used = sqrtf(vd_V_ * vd_V_ + vq_V_ * vq_V_);
+    const float headroom = max_voltage_V() - used;
+    return headroom > 0.0f ? headroom : 0.0f;
+  }
 
   void Observe(float ia, float ib, float ic)
   {
@@ -149,10 +194,10 @@ class CurrentLoop
     const float i_q_cmd = iq_ref_;
 
     const float cross_d =
-        -omega_elec_ * options_.inductance_H * i_q_cmd *
+        -omega_elec_ * options_.inductance_q_H * i_q_cmd *
         options_.cross_coupling_feedforward;
     const float cross_q =
-        omega_elec_ * options_.inductance_H * i_d_cmd *
+        omega_elec_ * options_.inductance_d_H * i_d_cmd *
         options_.cross_coupling_feedforward;
 
     const float d_ff =
@@ -185,7 +230,11 @@ class CurrentLoop
     vd_V_ = d_V;
     vq_V_ = q_V;
 
-    const math::SinCos sc = math::SinCosFromRadians(theta_);
+    // Measurement Park (Observe) used the sampled angle theta_; apply the
+    // voltage at the predicted angle one transport delay ahead.
+    const float theta_out =
+        math::WrapZeroToTwoPi(theta_ + omega_elec_ * options_.phase_lead_s);
+    const math::SinCos sc = math::SinCosFromRadians(theta_out);
     const math::InverseDqTransform idt(sc, vd_V_, vq_V_);
 
     math::BalancedPwm pwm;
@@ -207,10 +256,10 @@ class CurrentLoop
   {
     pi_d_cfg_.kp = options_.kp_d;
     pi_d_cfg_.ki = options_.ki_d;
-    pi_d_cfg_.max_desired_rate = 0.0f;
+    pi_d_cfg_.max_desired_rate = options_.max_current_desired_rate_A_s;
     pi_q_cfg_.kp = options_.kp_q;
     pi_q_cfg_.ki = options_.ki_q;
-    pi_q_cfg_.max_desired_rate = 0.0f;
+    pi_q_cfg_.max_desired_rate = options_.max_current_desired_rate_A_s;
   }
 
   float ClampCurrent(float i) const

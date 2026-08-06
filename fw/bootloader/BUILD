@@ -55,7 +55,10 @@ cc_binary(
         "inc/bootloader.h",
         "vectors.S",
     ],
-    deps = ["@com_github_ARMmbed_mbed-g4//:mbed"],
+    deps = [
+        "//fw/HAL:system_clock",
+        "@com_github_ARMmbed_mbed-g4//:mbed",
+    ],
     includes = ["inc"],
     copts = BAREMETAL_COPTS,
     linkopts = BAREMETAL_LINKOPTS + ["-T$(location stm32g474_bootloader.ld)"],

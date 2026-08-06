@@ -47,8 +47,8 @@
       <div class="row">
         <button id="btnDq" type="button">Start dq</button>
       </div>
-      <label style="margin-top:1rem">ω_mech (rad/s) — moteus PID vel</label>
-      <input id="omegaMech" type="number" step="1" value="20" />
+      <label style="margin-top:1rem">ω_mech (rad/s) — PID vel，限幅 ±200</label>
+      <input id="omegaMech" type="number" step="1" min="-200" max="200" value="20" />
       <div class="row">
         <button id="btnVel" type="button">Start vel (PID)</button>
         <button class="stop" id="btnStop" type="button">Stop</button>
@@ -103,6 +103,8 @@
             <label class="inlineChk">N <input id="snapN" type="number" min="32" max="512" step="32" value="512" style="width:4.5rem" /></label>
             <label class="inlineChk">dec <input id="snapDec" type="number" min="1" max="16" value="1" style="width:3rem" /></label>
             <button id="btnSnap" type="button">Capture</button>
+            <label class="inlineChk">ω <input id="snapOmega" type="number" step="1" value="200" style="width:4rem" title="当前机械转速 rad/s，用于对比期望电频率" /></label>
+            <button class="ghost" id="btnSnapAnalyze" type="button">分析</button>
             <button class="ghost" id="btnSnapAuto" type="button">Autoscale</button>
           </div>
         </div>
@@ -118,6 +120,7 @@
           <div class="canvas-wrap">
             <canvas id="snapPlot" width="1000" height="360"></canvas>
             <div class="hint">默认 15 kHz × 512 点 · 通道 Id/Iq/I1/I2/I3</div>
+            <pre class="infoBox" id="snapAnalysis" style="margin-top:0.5rem">点击「分析」输出：各通道频率/幅值、i1+i2+i3 残差、dq/相频比</pre>
           </div>
         </div>
       </section>
@@ -125,19 +128,55 @@
       
       <section class="panel" id="panelCal" hidden>
         <div class="plot-head">
-          <h2>编码器电角度标定</h2>
+          <h2>标定 / 辨识</h2>
         </div>
         <p class="hint" style="margin-top:0">
-          参考 moteus：锁定 d 轴辨识 offset/sign，成功后自动写入运行时并保存到 Flash NVS（掉电保留）。
-          推荐先用「锁定校准」。
+          参考 moteus：推荐顺序为 R → Ld/Lq → 编码器转圈映射 → Ke。
+          转圈映射会以恒定 D 轴电流正反各转两圈，并以受限加速度平滑换向；生成的 64 点周期换相补偿表会保存到 Flash NVS。
+          DM4310 建议 40 elec rad/s、1.0 A 起步；固件将转圈速度限制为 80、校准电流限制为 2.0 A。
+          「锁定校准」只辨识单一全局 offset，用于低速诊断，不能替代转圈映射。
         </p>
-        <label>校准电压 V</label>
-        <input id="calV" type="number" step="0.1" value="1.5" />
-        <label>转圈 |ω| elec (rad/s) — 仅转圈模式</label>
-        <input id="calOmega" type="number" step="1" value="40" />
+        <label>标定方式</label>
+        <select id="calMethod">
+          <option value="spin">编码器转圈映射（64 点，推荐）</option>
+          <option value="lock">编码器锁定校准（仅全局 offset）</option>
+          <option value="r">R 相电阻辨识（电流扫描，无需编码器）</option>
+          <option value="l">Ld/Lq 电感辨识（电压阶跃，无需编码器）</option>
+          <option value="bemf">Ke 反电动势辨识（闭环速度扫描）</option>
+          <option value="cogging">齿槽补偿标定（慢速正反转映射，需先标编码器）</option>
+        </select>
+        <div id="calParamsEnc">
+          <label>校准电流 A（建议 1.0 A，最高 2.0 A）</label>
+          <input id="calCurrent" type="number" step="0.1" min="0.1" max="2.0" value="1.0" />
+          <label>转圈 |ω| elec (rad/s) — 建议 40，最高 80</label>
+          <input id="calOmega" type="number" step="1" min="1" max="80" value="40" />
+        </div>
+        <div id="calParamsBemf" hidden>
+          <label>扫描最高转速 ω mech (rad/s)</label>
+          <input id="calBemfMaxSpeed" type="number" step="1" value="60" />
+          <label>扫描点数（3～8，越多拟合越稳）</label>
+          <input id="calBemfPoints" type="number" step="1" min="3" max="8" value="5" />
+        </div>
+        <div id="calParamsR" hidden>
+          <label>扫描最大电流 A</label>
+          <input id="calRMaxCurrent" type="number" step="0.1" value="1.5" />
+          <label>扫描点数（3～8，越多拟合越稳）</label>
+          <input id="calRPoints" type="number" step="1" min="3" max="8" value="5" />
+        </div>
+        <div id="calParamsL" hidden>
+          <label>D/Q 阶跃电压 V（叠加在 d 轴保持电压上）</label>
+          <input id="calLStepVoltage" type="number" step="0.1" value="3.0" />
+          <label>每轴重复次数（3～8，依次测 Ld、Lq）</label>
+          <input id="calLTrials" type="number" step="1" min="3" max="8" value="5" />
+        </div>
+        <div id="calParamsCogging" hidden>
+          <label>扫描速度 ω mech (rad/s)（要能顺畅转起来，建议 5，可到 10~60）</label>
+          <input id="calCoggingVelocity" type="number" step="0.5" min="0.5" value="5" />
+          <label>每方向记录圈数（越高越稳，建议 4；高速时加大）</label>
+          <input id="calCoggingRevs" type="number" step="1" min="1" value="4" />
+        </div>
         <div class="row" style="margin-top:0.8rem">
-          <button id="btnCalLock" type="button">锁定校准（推荐）</button>
-          <button class="ghost" id="btnCalSpin" type="button">转圈校准</button>
+          <button id="btnCalStart" type="button">开始标定</button>
           <button class="stop" id="btnCalAbort" type="button">中止</button>
         </div>
         <div class="status" id="calStatus">idle</div>

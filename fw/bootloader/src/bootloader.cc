@@ -13,6 +13,7 @@
 #include "bootloader.h"
 #include "BL_Config.h"
 #include "BL_CommandServer.h"
+#include "HAL/system_clock.h"
 
 namespace boot
 {
@@ -32,12 +33,7 @@ void DelayNops(uint32_t count)
 
 void ClockInit()
 {
-  while (!(RCC->CR & RCC_CR_HSIRDY))
-  {
-  }
-  SystemCoreClock = kSystemClockHz;
-  RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_FDCANSEL_Msk) |
-               (2UL << RCC_CCIPR_FDCANSEL_Pos);
+  hal::SetupSystemClock();
 }
 
 void DwtInit()
@@ -132,9 +128,9 @@ class BootOrchestrator
     for (int i = 0; i < 3; i++)
     {
       LedOn();
-      DelayNops(200000);
+      DelayNops(2000000);
       LedOff();
-      DelayNops(200000);
+      DelayNops(2000000);
     }
     state_ = BootState::JUMP_TO_APP;
   }
@@ -180,9 +176,9 @@ class BootOrchestrator
     for (int i = 0; i < 4; i++)
     {
       LedOn();
-      DelayNops(400000);
+      DelayNops(4000000);
       LedOff();
-      DelayNops(400000);
+      DelayNops(4000000);
     }
     __disable_irq();
   }

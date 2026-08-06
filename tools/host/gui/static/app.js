@@ -13,9 +13,11 @@ const CHANNELS = [
   { key: "vd_v", label: "Vd", path: "voltage/Vd", color: "#c47ad0", unit: "V", on: false, group: "voltage" },
   { key: "vq_v", label: "Vq", path: "voltage/Vq", color: "#d08a6a", unit: "V", on: false, group: "voltage" },
   { key: "bus_v", label: "Vbus", path: "voltage/Vbus", color: "#e08a8a", unit: "V", on: false, group: "voltage" },
+  { key: "voltage_headroom_v", label: "Vheadroom", path: "voltage/headroom", color: "#80c0c8", unit: "V", on: false, group: "voltage" },
   { key: "theta_rad", label: "theta", path: "motion/theta", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
   { key: "omega_rad_s", label: "omegaMeas", path: "motion/omega", color: "#88b0d0", unit: "rad/s", on: true, group: "motion" },
   { key: "omega_cmd_rad_s", label: "omegaCmd", path: "motion/omega_cmd", color: "#d0a088", unit: "rad/s", on: true, group: "motion" },
+  { key: "omega_elec_rad_s", label: "omegaElec", path: "motion/omega_elec", color: "#7098c0", unit: "rad/s", on: false, group: "motion" },
   { key: "enc_raw", label: "encRaw", path: "encoder/raw", color: "#c0d088", unit: "", on: true, group: "encoder" },
   { key: "enc_theta_mech_rad", label: "encMech", path: "encoder/theta_mech", color: "#a8c070", unit: "rad", on: true, group: "encoder" },
   { key: "enc_theta_elec_rad", label: "encElec", path: "encoder/theta_elec", color: "#88b060", unit: "rad", on: true, group: "encoder" },
@@ -721,24 +723,74 @@ document.getElementById("btnDq").onclick = () =>
     omega: Number(document.getElementById("omega").value),
   });
 
-document.getElementById("btnVel").onclick = () =>
+document.getElementById("btnVel").onclick = () => {
+  const input = document.getElementById("omegaMech");
+  const omega = Math.max(-200, Math.min(200, Number(input.value)));
+  input.value = String(omega);
   postCmd({
     op: "vel",
-    omega_mech: Number(document.getElementById("omegaMech").value),
+    omega_mech: omega,
     id: Number(document.getElementById("idA").value),
   });
+};
 
-document.getElementById("btnCalLock").onclick = () =>
-  postCmd({
-    op: "cal_lock",
-    voltage: Number(document.getElementById("calV").value),
-  });
-document.getElementById("btnCalSpin").onclick = () =>
-  postCmd({
-    op: "cal_enc",
-    voltage: Number(document.getElementById("calV").value),
-    omega_elec: Number(document.getElementById("calOmega").value),
-  });
+const calMethodEl = document.getElementById("calMethod");
+const calParamsEncEl = document.getElementById("calParamsEnc");
+const calParamsBemfEl = document.getElementById("calParamsBemf");
+const calParamsREl = document.getElementById("calParamsR");
+const calParamsLEl = document.getElementById("calParamsL");
+const calParamsCoggingEl = document.getElementById("calParamsCogging");
+function updateCalParamsVisibility() {
+  const m = calMethodEl.value;
+  calParamsEncEl.hidden =
+      m === "bemf" || m === "r" || m === "l" || m === "cogging";
+  calParamsBemfEl.hidden = m !== "bemf";
+  calParamsREl.hidden = m !== "r";
+  calParamsLEl.hidden = m !== "l";
+  if (calParamsCoggingEl) calParamsCoggingEl.hidden = m !== "cogging";
+}
+calMethodEl.addEventListener("change", updateCalParamsVisibility);
+updateCalParamsVisibility();
+
+document.getElementById("btnCalStart").onclick = () => {
+  const m = calMethodEl.value;
+  if (m === "lock") {
+    postCmd({
+      op: "cal_lock",
+      current: Number(document.getElementById("calCurrent").value),
+    });
+  } else if (m === "spin") {
+    postCmd({
+      op: "cal_enc",
+      current: Number(document.getElementById("calCurrent").value),
+      omega_elec: Number(document.getElementById("calOmega").value),
+    });
+  } else if (m === "bemf") {
+    postCmd({
+      op: "cal_bemf",
+      max_speed: Number(document.getElementById("calBemfMaxSpeed").value),
+      n_points: Number(document.getElementById("calBemfPoints").value),
+    });
+  } else if (m === "r") {
+    postCmd({
+      op: "cal_r",
+      max_current: Number(document.getElementById("calRMaxCurrent").value),
+      n_points: Number(document.getElementById("calRPoints").value),
+    });
+  } else if (m === "l") {
+    postCmd({
+      op: "cal_l",
+      step_voltage: Number(document.getElementById("calLStepVoltage").value),
+      n_trials: Number(document.getElementById("calLTrials").value),
+    });
+  } else if (m === "cogging") {
+    postCmd({
+      op: "cal_cogging",
+      velocity: Number(document.getElementById("calCoggingVelocity").value),
+      record_revs: Number(document.getElementById("calCoggingRevs").value),
+    });
+  }
+};
 document.getElementById("btnCalAbort").onclick = () =>
   postCmd({ op: "cal_abort" });
 
@@ -746,27 +798,100 @@ function judgeCalResult(t) {
   const resid = Number(t.cal_residual_rad) || 0;
   const samples = Number(t.cal_samples) || 0;
   const residDeg = (resid * 180) / Math.PI;
+  const mapped = Number(t.cal_kind) === CAL_KIND_ENCODER_MAP;
   let grade = "bad";
   let title = "不合格";
-  if (resid < 0.35) {
+  const goodLimit = mapped ? 0.12 : 0.2;
+  const warnLimit = mapped ? 0.25 : 0.4;
+  if (resid < goodLimit) {
     grade = "good";
-    title = "良好 — 可用于编码器换相";
-  } else if (resid < 0.7) {
+    title = mapped ? "良好 — 64 点换相表可用" : "良好 — 仅全局 offset";
+  } else if (resid < warnLimit) {
     grade = "warn";
-    title = "勉强 — 仅建议低速试闭环";
+    title = mapped ? "勉强 — 仅建议低速试闭环" : "勉强 — 请改做转圈映射";
   } else {
     grade = "bad";
-    title = "不合格 — 不要用于高速编码器换相";
+    title = "不合格 — 不要进入高速编码器换相";
   }
   const tips = [];
-  if (t.cal_persisted) tips.push("已自动写入 Flash NVS，掉电后仍会加载");
+  if (!t.cal_ok) tips.push("固件已拒绝该结果：未应用，也未写入 Flash NVS");
+  else if (t.cal_persisted) tips.push("已自动写入 Flash NVS，掉电后仍会加载");
   else tips.push("运行时已应用；Flash 写入未确认，可重做一次标定");
-  if (samples < 32) tips.push("采样偏少，请重做");
-  if (resid >= 0.7) {
-    tips.push("略增大校准电压（如 1.5～2.0 V）");
-    tips.push("确认轴空载且 enc_raw 连续变化");
+  if (mapped) tips.push("残差已扣除正反转的恒定扭矩角，只评价周期映射一致性");
+  if (!mapped) tips.push("锁定法没有周期补偿表；高速运行前必须完成转圈映射");
+  if (samples < 200) tips.push("有效采样偏少，请降低转速或略增大校准电流后重做");
+  if (resid >= warnLimit) {
+    tips.push("确认轴空载、enc_raw 连续且正反转都能跟随");
+    tips.push("校准电流可从 1.0 A 小步提高，最高 2.0 A");
   }
-  return { grade, title, resid, residDeg, samples, tips };
+  return { grade, title, resid, residDeg, samples, mapped, tips };
+}
+
+const CAL_KIND_ENCODER_MAP = 1;
+const CAL_KIND_BEMF = 3;
+const CAL_KIND_RESISTANCE = 4;
+const CAL_KIND_INDUCTANCE = 5;
+const CAL_KIND_COGGING = 6;
+
+function judgeBemfResult(t) {
+  const ke = Number(t.cal_offset_rad) || 0; // V*s/rad
+  const r2 = Number(t.cal_residual_rad) || 0; // 0..1
+  const points = Number(t.cal_samples) || 0;
+  const bemfVPerKrpm = (Math.sqrt(3) * ke * 2 * Math.PI * 1000) / 60;
+  const torqueConstant = 1.5 * ke;
+  let grade = "bad";
+  let title = "不合格";
+  if (r2 >= 0.98 && points >= 4) {
+    grade = "good";
+    title = "良好 — 可用于前馈";
+  } else if (r2 >= 0.9 && points >= 3) {
+    grade = "warn";
+    title = "勉强 — 建议增加扫描点/转速范围";
+  } else {
+    grade = "bad";
+    title = "不合格 — 检查负载是否为空载、转速是否达到目标";
+  }
+  return { grade, title, ke, r2, points, bemfVPerKrpm, torqueConstant };
+}
+
+function judgeRResult(t) {
+  const r = Number(t.cal_offset_rad) || 0; // Ohm
+  const r2 = Number(t.cal_residual_rad) || 0; // 0..1
+  const points = Number(t.cal_samples) || 0;
+  let grade = "bad";
+  let title = "不合格";
+  if (r2 >= 0.98 && points >= 4) {
+    grade = "good";
+    title = "良好 — 可用于电流环带宽计算";
+  } else if (r2 >= 0.9 && points >= 3) {
+    grade = "warn";
+    title = "勉强 — 建议增加扫描点/最大电流";
+  } else {
+    grade = "bad";
+    title = "不合格 — 检查电流是否达到目标、接线是否可靠";
+  }
+  return { grade, title, r, r2, points };
+}
+
+function judgeLResult(t) {
+  const ld = Number(t.cal_offset_rad) || 0; // Henry
+  const lq = Number(t.cal_residual_rad) || 0; // Henry
+  const trials = Number(t.cal_samples) || 0; // both axes combined
+  const ratio = ld > 0 ? lq / ld : 0;
+  const plausible = ld >= 1e-6 && ld <= 0.02 && lq >= 1e-6 && lq <= 0.02;
+  let grade = "bad";
+  let title = "不合格";
+  if (plausible && trials >= 8) {
+    grade = "good";
+    title = "良好 — Ld/Lq 可用于双轴电流环";
+  } else if (plausible && trials >= 4) {
+    grade = "warn";
+    title = "勉强 — 建议增加每轴重复次数";
+  } else {
+    grade = "bad";
+    title = plausible ? "不合格 — 有效试验次数太少" : "不合格 — Ld/Lq 超出合理范围";
+  }
+  return { grade, title, ld, lq, ratio, trials };
 }
 
 function updateCalPanel(t) {
@@ -778,6 +903,111 @@ function updateCalPanel(t) {
   if (!bar || !status || !verdict || !box) return;
   bar.style.width = `${pct}%`;
   status.textContent = `${t.cal_state_name || "idle"} · ${pct}% · samples=${t.cal_samples || 0}`;
+
+  if (t.cal_kind === CAL_KIND_BEMF) {
+    if (t.cal_state_name === "done" && t.cal_ok) {
+      const j = judgeBemfResult(t);
+      verdict.textContent = `判定：${j.title}（r² = ${j.r2.toFixed(4)}）`;
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add(`cal-${j.grade}`);
+      box.textContent =
+        `判定：${j.title}\n` +
+        `Ke_dq = ${j.ke.toFixed(6)} V*s/rad\n` +
+        `Kt = 1.5*Ke_dq = ${j.torqueConstant.toFixed(6)} Nm/A\n` +
+        `vendor line-line Vpeak/krpm ≈ ${j.bemfVPerKrpm.toFixed(3)}\n` +
+        `r² = ${j.r2.toFixed(4)}\n` +
+        `points_used = ${j.points}\n\n` +
+        `已运行时生效（current_loop Ke 与 position_loop Kt 已分别更新）\n` +
+        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}`;
+    } else if (t.cal_state_name === "failed") {
+      verdict.textContent = "判定：失败 — 拟合点不足或电机未跟上目标转速";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add("cal-bad");
+      box.textContent =
+        "FAILED — 确认已完成编码器标定、电机空载、扫描转速在可达范围内后重试";
+    } else if (t.cal_state_name === "bemf_run") {
+      verdict.textContent = "Ke 辨识中… 转轴会自行分级加速，保持空载";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    }
+    return;
+  }
+  if (t.cal_kind === CAL_KIND_RESISTANCE) {
+    if (t.cal_state_name === "done" && t.cal_ok) {
+      const j = judgeRResult(t);
+      verdict.textContent = `判定：${j.title}（r² = ${j.r2.toFixed(4)}）`;
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add(`cal-${j.grade}`);
+      box.textContent =
+        `判定：${j.title}\n` +
+        `R = ${j.r.toFixed(4)} Ohm\n` +
+        `r² = ${j.r2.toFixed(4)}\n` +
+        `points_used = ${j.points}\n\n` +
+        `已运行时生效（current_loop 电流环 kp/ki 已按新 R 重算）\n` +
+        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}\n\n` +
+        `建议接下来做 L 辨识（会自动用这个 R 值）。`;
+    } else if (t.cal_state_name === "failed") {
+      verdict.textContent = "判定：失败 — 拟合点不足";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add("cal-bad");
+      box.textContent = "FAILED — 确认接线可靠、电流能达到目标后重试";
+    } else if (t.cal_state_name === "r_run") {
+      verdict.textContent = "R 辨识中… 转子会被电流拉住对齐，勿用手转";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    }
+    return;
+  }
+  if (t.cal_kind === CAL_KIND_INDUCTANCE) {
+    if (t.cal_state_name === "done" && t.cal_ok) {
+      const j = judgeLResult(t);
+      verdict.textContent = `判定：${j.title}（两轴有效次数 ${j.trials}）`;
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add(`cal-${j.grade}`);
+      box.textContent =
+        `判定：${j.title}\n` +
+        `Ld = ${(j.ld * 1e6).toFixed(3)} uH\n` +
+        `Lq = ${(j.lq * 1e6).toFixed(3)} uH\n` +
+        `Lq/Ld = ${j.ratio.toFixed(3)}\n` +
+        `trials_used_total = ${j.trials}\n\n` +
+        `已运行时生效（D/Q 电流环 kp 与交叉耦合分别使用 Ld/Lq）\n` +
+        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}`;
+    } else if (t.cal_state_name === "failed") {
+      verdict.textContent = "判定：失败 — D/Q 至少一轴有效试验不足";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add("cal-bad");
+      box.textContent =
+        "FAILED — 先做 R；确认转子被 d 轴锁住，再小步调整阶跃电压";
+    } else if (t.cal_state_name === "l_run") {
+      verdict.textContent = "L 辨识中… 电压阶跃测试，勿用手转";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    }
+    return;
+  }
+  if (t.cal_kind === CAL_KIND_COGGING) {
+    if (t.cal_state_name === "done" && t.cal_ok) {
+      const scale = Number(t.cal_offset_rad) || 0;  // A per LSB
+      const peak = Number(t.cal_residual_rad) || 0;  // peak A
+      verdict.textContent = `判定：完成（峰值补偿电流 ${peak.toFixed(3)} A）`;
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add(peak > 1e-4 ? "cal-good" : "cal-warn");
+      box.textContent =
+        `判定：${peak > 1e-4 ? "已生成 1024 点齿槽补偿表" : "未测到明显齿槽（表为空）"}\n` +
+        `peak_comp = ${peak.toFixed(4)} A\n` +
+        `scale = ${scale.toExponential(3)} A/LSB\n` +
+        `cogging_table = 1024 bins\n\n` +
+        `已运行时生效（速度模式按转子位置前馈 q 电流）\n` +
+        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}`;
+    } else if (t.cal_state_name === "failed") {
+      verdict.textContent = "判定：失败 — 某些位置采样不足";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+      box.classList.add("cal-bad");
+      box.textContent =
+        "FAILED — 先完成编码器标定、电机空载、降低扫描速度或增加记录圈数后重试";
+    } else if (t.cal_state_name === "cogging_run") {
+      verdict.textContent = "齿槽标定中… 会慢速正反各转设定圈数，保持空载";
+      box.classList.remove("cal-good", "cal-warn", "cal-bad");
+    }
+    return;
+  }
   if (t.cal_state_name === "done" && t.cal_ok) {
     const j = judgeCalResult(t);
     const offF = Number(t.cal_offset_rad).toFixed(6);
@@ -788,7 +1018,8 @@ function updateCalPanel(t) {
       `判定：${j.title}\n` +
       `sign = ${t.cal_sign}\n` +
       `offset_rad = ${offF}\n` +
-      `residual_rms_elec ≈ ${j.resid.toFixed(4)} rad\n` +
+      `residual_rms_elec = ${j.resid.toFixed(4)} rad\n` +
+      `commutation_table = ${j.mapped ? "64 bins" : "none (global offset only)"}\n` +
       `samples = ${j.samples}\n` +
       `flash_nvs = ${t.cal_persisted ? "OK" : "pending/fail"}\n\n` +
       j.tips.map((s, i) => `${i + 1}. ${s}`).join("\n");
@@ -910,6 +1141,8 @@ const SNAP_CHS = [
   { key: "i1_a", label: "I1", color: "#6aa6ff", on: true },
   { key: "i2_a", label: "I2", color: "#4ec3e0", on: true },
   { key: "i3_a", label: "I3", color: "#3db8a0", on: true },
+  { key: "theta_mech_rad", label: "θmech", color: "#c8a0d0", on: false, unit: "rad" },
+  { key: "theta_elec_rad", label: "θelec", color: "#d0c070", on: false, unit: "rad" },
 ];
 let uiMode = "live";
 let snapData = null;
@@ -1100,6 +1333,53 @@ document.getElementById("btnSnap").onclick = async () => {
   } catch (e) {
     snapStatus.textContent = `error: ${e}`;
     snapStatus.classList.add("fail");
+  }
+};
+
+const snapAnalysisEl = document.getElementById("snapAnalysis");
+document.getElementById("btnSnapAnalyze").onclick = async () => {
+  if (!snapData) {
+    snapAnalysisEl.textContent = "先 Capture 一次快照";
+    return;
+  }
+  try {
+    const w = Number(document.getElementById("snapOmega").value) || 0;
+    const j = await postJson("/api/snap/analyze", {
+      pole_pairs: 14,
+      omega_mech: w,
+    });
+    let encRatio = null;
+    try {
+      encRatio = await postJson("/api/enc/ratio");
+    } catch (e) { encRatio = null; }
+    if (!j.ok) {
+      snapAnalysisEl.textContent = `失败: ${j.error || JSON.stringify(j)}`;
+      return;
+    }
+    snapAnalysisEl.textContent = [
+      `freq_hz: id=${j.freq_hz.id_a} iq=${j.freq_hz.iq_a} i1=${j.freq_hz.i1_a} i2=${j.freq_hz.i2_a} i3=${j.freq_hz.i3_a}`,
+      `amp_A: id=${j.amp_A.id_a} iq=${j.amp_A.iq_a} i1=${j.amp_A.i1_a} i2=${j.amp_A.i2_a} i3=${j.amp_A.i3_a}`,
+      `balance(min/max)=${j.balance_minmax_ratio}`,
+      `i1+i2+i3 pkpk=${j.sum_pkpk_A} A @ ${j.sum_freq_hz} Hz`,
+      `f(id/iq)/f(phase)=${j.dq_over_phase_ratio}`,
+      j.f_elec_expected_hz
+        ? `f_phase=${j.freq_hz.i1_a} Hz vs 期望电频 ${j.f_elec_expected_hz} Hz (比 ${j.f_phase_over_f_expected})`
+        : "未对比期望电频率（ω 输入为 0）",
+      encRatio && encRatio.samples > 4
+        ? `极对数实测: Δθelec/Δθmech = ${encRatio.pp_ratio}（样本 ${encRatio.samples}，期望 14）`
+        : "极对数实测: 样本不足（等电机稳定转一会再分析）",
+      j.theta_dbg
+        ? [
+            `Δθmech=${j.theta_dbg.d_mech_rad}rad Δθelec=${j.theta_dbg.d_elec_rad}rad`,
+            `f_mech(θ)=${j.f_mech_enc_hz}Hz f_elec(θ)=${j.f_elec_snap_hz}Hz`,
+            `θmech[0:16]=${j.theta_dbg.mech_first16.join(",")}`,
+            `θelec[0:16]=${j.theta_dbg.elec_first16.join(",")}`,
+          ].join("\n")
+        : "",
+      "解读: dq/相≈1→offset/1x · ≈2→增益失配/2x · 相频/期望≈1→极对数对 · 极对数实测≠14→角度换算 bug",
+    ].join("\n");
+  } catch (e) {
+    snapAnalysisEl.textContent = `error: ${e}`;
   }
 };
 

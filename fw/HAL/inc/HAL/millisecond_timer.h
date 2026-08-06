@@ -27,6 +27,7 @@ class MillisecondTimer
     TIM_MST_RCC;
 
     // G4 TIM_MST is already on the 1x timer clock path used by moteus.
+    // SystemCoreClock is the real SYSCLK (170 MHz after SetupSystemClock).
     constexpr int kExtraPrescaler = 1;
 
     handle_.Instance = TIM_MST;

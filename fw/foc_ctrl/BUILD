@@ -81,17 +81,3 @@ cc_library(
     ],
     visibility = ["//fw:__subpackages__"],
 )
-
-# Deprecated: kept for reference; app uses position_loop.
-cc_library(
-    name = "speed_loop",
-    hdrs = ["inc/foc_ctrl/speed_loop.h"],
-    includes = ["inc"],
-    deps = ["//fw/math:math"],
-    copts = [
-        "-mcpu=cortex-m4",
-        "-mthumb",
-        "-std=c++17",
-    ],
-    visibility = ["//fw:__subpackages__"],
-)

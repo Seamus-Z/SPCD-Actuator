@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import subprocess
 import sys
@@ -25,6 +26,7 @@ GUI_ROOT = Path(__file__).resolve().parent
 HOST_ROOT = GUI_ROOT.parent
 STATIC_DIR = GUI_ROOT / "static"
 sys.path.insert(0, str(HOST_ROOT))
+import snap_analysis as _snap_an  # noqa: E402
 
 from xt_proto import (  # noqa: E402
     CMD_INFO,
@@ -46,8 +48,12 @@ from xt_proto import (  # noqa: E402
     pack_dq,
     pack_query,
     pack_cal_abort,
+    pack_cal_bemf,
     pack_cal_enc,
     pack_cal_lock,
+    pack_cal_r,
+    pack_cal_l,
+    pack_cal_cogging,
     pack_raw,
     pack_vel,
     pack_info,
@@ -83,6 +89,10 @@ _CAL_STATE_NAMES = {
     4: "done",
     5: "failed",
     6: "locking",
+    7: "bemf_run",
+    8: "r_run",
+    9: "l_run",
+    10: "cogging_run",
 }
 _MODE_NAMES = {
     0: "stop",
@@ -310,6 +320,8 @@ class CanBridge:
         self.latest: Telemetry | None = None
         self.latest_enc: EncTelem | None = None
         self.latest_cal: CalTelem | None = None
+        self.enc_ratio = {"d_mech": 0.0, "d_elec": 0.0, "n": 0}
+        self.enc_ratio_last: tuple | None = None
         self.motor_ok = False
         self.motor_error: str | None = None
         self.info: Info | None = None
@@ -386,6 +398,8 @@ class CanBridge:
             self.latest = None
             self.latest_enc = None
             self.latest_cal = None
+            self.enc_ratio = {"d_mech": 0.0, "d_elec": 0.0, "n": 0}
+            self.enc_ratio_last = None
             self._telem_ring.clear()
             self._telem_sid = 0
             self._rx_count = 0
@@ -530,9 +544,13 @@ class CanBridge:
                 with self._lock:
                     self.latest = telem
                     self.latest_enc = enc
+                    self._accum_enc_ratio(enc)
                     cal = self.latest_cal
                     sample = self._live_dict_locked(
-                        telem, enc, cal, omega_cmd=msg.omega_cmd_rad_s
+                        telem, enc, cal,
+                        omega_cmd=msg.omega_cmd_rad_s,
+                        omega_elec=msg.omega_elec_rad_s,
+                        voltage_headroom=msg.voltage_headroom_v,
                     )
                     self._push_live_sample(sample)
                 self.msglog.maybe_ctrl(msg)
@@ -582,6 +600,13 @@ class CanBridge:
                 )
                 self._snap_metas.put(msg)
             elif isinstance(msg, SnapData):
+                # TEMP debug: first snap frame samples layout check
+                if getattr(self, "_snap_dump_done", False) is False:
+                    self.msglog.push(
+                        "SYS",
+                        f"SNAPDUMP n={msg.n} samples={list(msg.samples_mA[:14])}",
+                    )
+                    self._snap_dump_done = True
                 self._snap_datas.put(msg)
 
     def _send_raw(self, payload: bytes, log: bool = True):
@@ -882,8 +907,28 @@ class CanBridge:
         return result
 
 
-    def _live_dict_locked(self, t: Telemetry, enc: EncTelem | None, cal: CalTelem | None,
-                          omega_cmd: float | None = None) -> dict:
+    def _accum_enc_ratio(self, enc: EncTelem | None):
+        """Accumulate unwrapped mech/elec angle deltas to measure the true
+        electrical-periods-per-mechanical-revolution ratio (= pole pairs)."""
+        if enc is None or not enc.ok:
+            return
+        m, e = enc.theta_mech_rad, enc.theta_elec_rad
+        last = self.enc_ratio_last
+        if last is not None:
+            dm = m - last[0]
+            de = e - last[1]
+            dm = ((dm + math.pi) % (2.0 * math.pi)) - math.pi
+            de = ((de + math.pi) % (2.0 * math.pi)) - math.pi
+            self.enc_ratio["d_mech"] += dm
+            self.enc_ratio["d_elec"] += de
+            self.enc_ratio["n"] += 1
+        self.enc_ratio_last = (m, e)
+
+    def _live_dict_locked(
+        self, t: Telemetry, enc: EncTelem | None, cal: CalTelem | None,
+        omega_cmd: float | None = None, omega_elec: float = 0.0,
+        voltage_headroom: float = 0.0,
+    ) -> dict:
         enc_fields = {
             "enc_raw": enc.raw if enc else 0,
             "enc_theta_mech_rad": enc.theta_mech_rad if enc else 0.0,
@@ -917,6 +962,8 @@ class CanBridge:
             "theta_rad": t.theta_rad,
             "omega_rad_s": t.omega_rad_s,
             "omega_cmd_rad_s": float(omega_cmd) if omega_cmd is not None else t.omega_rad_s,
+            "omega_elec_rad_s": float(omega_elec),
+            "voltage_headroom_v": float(voltage_headroom),
             "vd_v": t.vd_v,
             "vq_v": t.vq_v,
             "duty_a": t.duty_a,
@@ -1126,6 +1173,39 @@ def make_handler(bridge: CanBridge):
                 except Exception as exc:  # noqa: BLE001
                     self._json(500, {"ok": False, "error": str(exc)})
                 return
+            if path == "/api/snap/analyze":
+                try:
+                    snap = bridge.last_snap
+                    if not snap:
+                        self._json(200, {"ok": False, "error": "no snapshot yet"})
+                        return
+                    pp = float(req.get("pole_pairs", 14))
+                    w = float(req.get("omega_mech", 0) or 0)
+                    if w <= 0.0 and getattr(bridge, "latest", None) is not None:
+                        w = float(getattr(bridge.latest, "omega_rad_s", 0) or 0)
+                    an = _snap_an.analyze(snap, pole_pairs=pp, omega_mech_rad_s=w)
+                    an["omega_mech_used"] = w
+                    self._json(200, {"ok": True, **an})
+                except Exception as exc:  # noqa: BLE001
+                    self._json(500, {"ok": False, "error": str(exc)})
+                return
+            if path == "/api/enc/ratio":
+                try:
+                    with bridge._lock:
+                        r = dict(bridge.enc_ratio)
+                    ratio = (r["d_elec"] / r["d_mech"]) if abs(r["d_mech"]) > 1e-3 else 0.0
+                    self._json(200, {
+                        "ok": True,
+                        "d_mech_rad": round(r["d_mech"], 3),
+                        "d_elec_rad": round(r["d_elec"], 3),
+                        "pp_ratio": round(ratio, 3),
+                        "samples": r["n"],
+                        "expect": 14,
+                        "note": "ratio = 电角度/机械角度；≈14 说明极对数/角度换算正确，>1.3x 或 <0.7x 则是换算 bug",
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    self._json(500, {"ok": False, "error": str(exc)})
+                return
             if path == "/api/messages/clear":
                 bridge.msglog.clear()
                 self._json(200, {"ok": True})
@@ -1179,14 +1259,42 @@ def make_handler(bridge: CanBridge):
                 if op == "cal_enc":
                     bridge.set_stream("query")
                     payload = pack_cal_enc(
-                        float(req.get("voltage", 1.5)),
+                        float(req.get("current", 1.0)),
                         float(req.get("omega_elec", 40)),
                         bridge._next_seq(),
                     )
                 elif op == "cal_lock":
                     bridge.set_stream("query")
                     payload = pack_cal_lock(
-                        float(req.get("voltage", 1.5)),
+                        float(req.get("current", 1.0)),
+                        bridge._next_seq(),
+                    )
+                elif op == "cal_bemf":
+                    bridge.set_stream("query")
+                    payload = pack_cal_bemf(
+                        float(req.get("max_speed", 60.0)),
+                        int(req.get("n_points", 0)),
+                        bridge._next_seq(),
+                    )
+                elif op == "cal_r":
+                    bridge.set_stream("query")
+                    payload = pack_cal_r(
+                        float(req.get("max_current", 1.5)),
+                        int(req.get("n_points", 0)),
+                        bridge._next_seq(),
+                    )
+                elif op == "cal_l":
+                    bridge.set_stream("query")
+                    payload = pack_cal_l(
+                        float(req.get("step_voltage", 3.0)),
+                        int(req.get("n_trials", 0)),
+                        bridge._next_seq(),
+                    )
+                elif op == "cal_cogging":
+                    bridge.set_stream("query")
+                    payload = pack_cal_cogging(
+                        float(req.get("velocity", 1.0)),
+                        float(req.get("record_revs", 0.0)),
                         bridge._next_seq(),
                     )
                 elif op == "cal_abort":

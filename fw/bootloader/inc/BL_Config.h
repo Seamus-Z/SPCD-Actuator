@@ -14,4 +14,5 @@ inline constexpr uint32_t kBootMagicValue = 0xB00710AD;
 inline constexpr uint8_t kDefaultCanId = 1;
 inline constexpr uint8_t kTunnelChannel = 1;
 
-inline constexpr uint32_t kSystemClockHz = 16000000;
+// After SetupSystemClock(): HSI→PLL SYSCLK/HCLK = 170 MHz (APB1/APB2 = 85 MHz).
+inline constexpr uint32_t kSystemClockHz = 170000000;

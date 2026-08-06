@@ -10,6 +10,17 @@ BAREMETAL_COPTS = [
 ]
 
 cc_library(
+    name = "system_clock",
+    srcs = ["src/system_clock.cc"],
+    hdrs = ["inc/HAL/system_clock.h"],
+    # Physical path inc/HAL/foo.h matches #include "HAL/foo.h".
+    includes = ["inc"],
+    deps = ["@com_github_ARMmbed_mbed-g4//:mbed"],
+    copts = BAREMETAL_COPTS,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "hal",
     srcs = [
         "src/fdcan.cc",
@@ -25,7 +36,10 @@ cc_library(
     ],
     # Physical path inc/HAL/foo.h matches #include "HAL/foo.h".
     includes = ["inc"],
-    deps = ["@com_github_ARMmbed_mbed-g4//:mbed"],
+    deps = [
+        ":system_clock",
+        "@com_github_ARMmbed_mbed-g4//:mbed",
+    ],
     copts = BAREMETAL_COPTS,
     visibility = ["//visibility:public"],
 )

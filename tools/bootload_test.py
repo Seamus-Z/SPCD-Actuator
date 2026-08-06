@@ -21,11 +21,14 @@ BOOT_REQUEST_ID = 0x7E
 BOOT_REQUEST_PAYLOAD = b"BOOT"
 
 FLASH_PAGE_SIZE = 2048
-WRITE_SIZE = 8
+FAST_WRITE_SIZE = 24
+FAST_WRITE_SETTLE_DELAY_S = 0.002
+FAST_PAGE_ERASE_SETTLE_DELAY_S = 0.05
+SAFE_WRITE_SIZE = 8
+SAFE_WRITE_SETTLE_DELAY_S = 0.05
+SAFE_PAGE_ERASE_SETTLE_DELAY_S = 0.25
 WRITE_TIMEOUT_S = 10.0
 RESPONSE_POLL_INTERVAL_S = 0.5
-WRITE_SETTLE_DELAY_S = 0.05
-PAGE_ERASE_SETTLE_DELAY_S = 0.25
 PAGE_WRITE_ATTEMPTS = 5
 VERIFY_ATTEMPTS = 5
 POWER_RECOVERY_DELAY_S = 2.0
@@ -78,12 +81,12 @@ def parse_response(data):
 
 
 class BootloaderClient:
-    def __init__(self, bus, can_module, verbose=False):
+    def __init__(self, bus, can_module, verbose=False, safe_writes=False):
         self.bus = bus
         self.can = can_module
         self.verbose = verbose
+        self.safe_writes = safe_writes
         self.response_id = (BOOT_ID << 8) | HOST_ID
-
     def _send(self, arbitration_id, data, extended, fd=True):
         self.bus.send(self.can.Message(
             arbitration_id=arbitration_id,
@@ -230,25 +233,37 @@ class BootloaderClient:
                     print(
                         f"retrying flash page 0x{APP_START + page_offset:08x} "
                         f"({attempt}/{PAGE_WRITE_ATTEMPTS})")
+            if self.safe_writes:
+                write_size = SAFE_WRITE_SIZE
+                write_delay = SAFE_WRITE_SETTLE_DELAY_S
+                erase_delay = SAFE_PAGE_ERASE_SETTLE_DELAY_S
+            else:
+                write_size = FAST_WRITE_SIZE
+                write_delay = FAST_WRITE_SETTLE_DELAY_S
+                erase_delay = FAST_PAGE_ERASE_SETTLE_DELAY_S
             try:
-                for block_offset in range(0, len(page), WRITE_SIZE):
-                    block = page[block_offset:block_offset + WRITE_SIZE]
+                for block_offset in range(0, len(page), write_size):
+                    block = page[block_offset:block_offset + write_size]
                     address = APP_START + page_offset + block_offset
                     self.command(
                         f"w {address:08x} {block.hex()}",
                         timeout=WRITE_TIMEOUT_S)
-                    # Flash programming current is bursty. Pace every command
-                    # so a marginal rail can recover instead of sagging after
-                    # dozens of back-to-back double-word programs.
-                    delay = (
-                        PAGE_ERASE_SETTLE_DELAY_S if block_offset == 0
-                        else WRITE_SETTLE_DELAY_S)
+                    # The command reply means Flash is no longer busy.  The
+                    # remaining delay only gives a marginal supply time to
+                    # recover from the programming-current pulse.
+                    delay = erase_delay if block_offset == 0 else write_delay
                     time.sleep(delay)
                     completed = min(
                         page_offset + block_offset + len(block), image_size)
                     self._progress("write", completed, image_size)
                 return
             except (TimeoutError, RuntimeError) as error:
+                if not self.safe_writes:
+                    self.safe_writes = True
+                    if self.verbose:
+                        print(
+                            "\nfast write failed; retrying this page and all "
+                            "remaining pages with safe pacing")
                 if self.verbose:
                     print(
                         f"\nflash page 0x{APP_START + page_offset:08x} "
@@ -300,6 +315,9 @@ class BootloaderClient:
         # "lock" cannot lose bytes buffered only in the bootloader's RAM.
         padded_image = image + b"\xff" * ((-len(image)) % 8)
 
+        if self.verbose:
+            mode = "safe 8-byte" if self.safe_writes else "fast 24-byte"
+            print(f"Flash write mode: {mode}")
         self.command("unlock")
         for page_offset in range(0, len(padded_image), FLASH_PAGE_SIZE):
             page = padded_image[page_offset:page_offset + FLASH_PAGE_SIZE]
@@ -328,6 +346,9 @@ def main():
                         help="request bootloader mode using standard ID 0x7e/BOOT")
     parser.add_argument("--flash", metavar="APP.BIN",
                         help="enter BL, program a raw app binary, verify, reset")
+    parser.add_argument(
+        "--safe", action="store_true",
+        help="force conservative 8-byte writes instead of adaptive fast mode")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -337,7 +358,8 @@ def main():
         sys.exit("python-can is required: python3 -m pip install python-can")
 
     bus = can.Bus(interface="socketcan", channel=args.interface, fd=True)
-    client = BootloaderClient(bus, can, args.verbose)
+    client = BootloaderClient(
+        bus, can, verbose=args.verbose, safe_writes=args.safe)
     try:
         if args.enter or args.flash:
             client.enter()

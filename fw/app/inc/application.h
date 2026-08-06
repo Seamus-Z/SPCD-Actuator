@@ -10,6 +10,11 @@
 #include "binary_commands.h"
 #include "device/drv8353s.h"
 #include "calibration/encoder_phase.h"
+#include "calibration/bemf_ident.h"
+#include "calibration/r_ident.h"
+#include "calibration/l_ident.h"
+#include "calibration/cogging.h"
+#include "math/cogging.h"
 #include "device/ma600.h"
 #include "foc_ctrl/current_loop.h"
 #include "foc_ctrl/encoder_pll.h"
@@ -73,7 +78,17 @@ class Application
                                              uint8_t status) const;
   void SampleEncoder();
   void ApplyEncoderCalResult();
+  void RestoreEncoderCalBackup();
   void PersistEncoderCalResult();
+  void ApplyBemfCalResult();
+  void PersistBemfCalResult();
+  void ApplyRIdentResult();
+  void PersistRIdentResult();
+  void ApplyLIdentResult();
+  void PersistLIdentResult();
+  void ApplyCoggingResult();
+  void PersistCoggingResult();
+  float CoggingComp() const;
   void UpdateEncoderPll(float dt_s);
 
   State state_ = State::INIT;
@@ -90,7 +105,25 @@ class Application
   float cal_last_omega_cmd_ = 0.0f;
   bool encoder_cal_dirty_ = false;
   bool encoder_cal_persisted_ = false;
+  device::Ma600::Options encoder_cal_backup_{};
+  bool encoder_cal_backup_valid_ = false;
+  bool bemf_cal_dirty_ = false;
+  bool bemf_cal_persisted_ = false;
+  bool r_cal_dirty_ = false;
+  bool r_cal_persisted_ = false;
+  bool l_cal_dirty_ = false;
+  bool l_cal_persisted_ = false;
+  bool cogging_cal_dirty_ = false;
+  bool cogging_cal_persisted_ = false;
   calibration::EncoderPhaseCal encoder_cal_{};
+  calibration::BemfIdentCal bemf_cal_{};
+  calibration::RIdentCal r_cal_{};
+  calibration::LIdentCal l_cal_{};
+  calibration::CoggingCal cogging_cal_{};
+  math::CoggingTable cogging_table_{};
+  float cogging_scale_ = 0.0f;
+  bool cogging_valid_ = false;
+  uint8_t last_cal_kind_ = 0;  // kCalSub* of the most recently started cal
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType telem_last_us_ = 0;
   hal::MillisecondTimer::TimerType last_rx_us_ = 0;

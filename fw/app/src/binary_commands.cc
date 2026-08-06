@@ -6,6 +6,7 @@
 #include "board_config.h"
 #include "device/motor.h"
 #include "foc_ctrl/simple_pi.h"
+#include "math/commutation.h"
 #include "telemetry/xt_can.h"
 
 namespace app
@@ -225,8 +226,9 @@ uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
     app_->position_loop_->SetVelocity(omega_ref);
     app_->position_loop_->SetIdRef(id_ref);
     app_->current_loop_->SetRefs(id_ref, app_->current_loop_->iq_ref_A());
-    app_->current_loop_->SetOmega(omega_ref * board::MotorParams().pole_pairs,
-                                  omega_ref);
+    const float omega_control = app_->position_loop_->control_velocity();
+    app_->current_loop_->SetOmega(
+        omega_control * board::MotorParams().pole_pairs, omega_control);
     return telemetry::xt_can::kStatusOk;
   }
 
@@ -246,8 +248,9 @@ uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
   cmd.iq_A = 0.0f;
   cmd.theta_rate_rad_s = 0.0f;
   app_->current_loop_->Start(cmd);
-  app_->current_loop_->SetOmega(omega_ref * board::MotorParams().pole_pairs,
-                                omega_ref);
+  const float omega_control = app_->position_loop_->control_velocity();
+  app_->current_loop_->SetOmega(
+      omega_control * board::MotorParams().pole_pairs, omega_control);
 
   app_->last_current_ = app_->current_adc_->ReadLatest();
   foc_ctrl::CurrentLoop::Duties duties;
@@ -346,15 +349,264 @@ uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
   {
     app_->encoder_cal_.Stop();
     app_->StopOutput();
+    app_->RestoreEncoderCalBackup();
     return telemetry::xt_can::kStatusOk;
   }
   const bool is_spin = req.subcmd == telemetry::xt_can::kCalSubEncPhase;
   const bool is_lock = req.subcmd == telemetry::xt_can::kCalSubEncLock;
-  if (is_spin == false && is_lock == false)
+  const bool is_bemf = req.subcmd == telemetry::xt_can::kCalSubBemf;
+  const bool is_r = req.subcmd == telemetry::xt_can::kCalSubResistance;
+  const bool is_l = req.subcmd == telemetry::xt_can::kCalSubInductance;
+  const bool is_cogging = req.subcmd == telemetry::xt_can::kCalSubCogging;
+  if (!is_spin && !is_lock && !is_bemf && !is_r && !is_l && !is_cogging)
   {
     return telemetry::xt_can::kStatusBadCmd;
   }
-  if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr)
+  if (is_r)
+  {
+    if (app_->current_loop_.get() == nullptr)
+    {
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->current_loop_->Stop();
+    if (app_->position_loop_.get() != nullptr)
+    {
+      app_->position_loop_->Stop();
+    }
+    if (app_->voltage_foc_.get() != nullptr)
+    {
+      app_->voltage_foc_->Stop();
+    }
+    app_->phase_pwm_->DisableControlIsr();
+
+    calibration::RIdentCal::Options ropts;
+    const float max_current =
+        static_cast<float>(req.omega_elec_mrad_s) * 0.001f;
+    ropts.max_current_A = (max_current > 0.05f) ? max_current : 1.5f;
+    if (req.voltage_mV > 0)
+    {
+      ropts.n_points = static_cast<uint8_t>(
+          req.voltage_mV > 255 ? 255 : req.voltage_mV);
+    }
+    app_->last_cal_kind_ = telemetry::xt_can::kCalSubResistance;
+    app_->r_cal_.Start(ropts);
+
+    foc_ctrl::CurrentLoop::Command cmd;
+    cmd.theta_rad = 0.0f;
+    cmd.id_A = app_->r_cal_.id_cmd_A();
+    cmd.iq_A = 0.0f;
+    cmd.theta_rate_rad_s = 0.0f;
+    app_->current_loop_->Start(cmd);
+
+    app_->last_current_ = app_->current_adc_->ReadLatest();
+    foc_ctrl::CurrentLoop::Duties duties;
+    if (app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
+                                  app_->last_current_.i2_A,
+                                  app_->last_current_.i3_A, &duties,
+                                  nullptr) == false)
+    {
+      app_->current_loop_->Stop();
+      app_->r_cal_.Stop();
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->id_A_ = app_->current_loop_->id_A();
+    app_->iq_A_ = app_->current_loop_->iq_A();
+    app_->dq_valid_ = app_->last_current_.ok;
+    app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    app_->gate_driver_->PowerOn();
+    app_->pwm_output_on_ = true;
+    app_->mode_ = telemetry::xt_can::kModeCal;
+    app_->StartControlIsr();
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (is_l)
+  {
+    if (app_->voltage_foc_.get() == nullptr ||
+        app_->current_loop_.get() == nullptr)
+    {
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->current_loop_->Stop();
+    if (app_->position_loop_.get() != nullptr)
+    {
+      app_->position_loop_->Stop();
+    }
+    app_->voltage_foc_->Stop();
+    app_->phase_pwm_->DisableControlIsr();
+
+    calibration::LIdentCal::Options lopts;
+    lopts.resistance_ohm = app_->current_loop_->resistance_ohm();
+    if (req.voltage_mV > 0)
+    {
+      lopts.step_voltage_V = static_cast<float>(req.voltage_mV) * 0.001f;
+    }
+    if (req.omega_elec_mrad_s > 0)
+    {
+      lopts.n_trials = static_cast<uint8_t>(
+          req.omega_elec_mrad_s > 255 ? 255 : req.omega_elec_mrad_s);
+    }
+    app_->last_cal_kind_ = telemetry::xt_can::kCalSubInductance;
+    app_->l_cal_.Start(lopts);
+
+    foc_ctrl::VoltageFoc::Command cmd;
+    cmd.theta_rad = 0.0f;
+    cmd.voltage_V = app_->l_cal_.voltage_d_cmd_V();
+    cmd.q_voltage_V = app_->l_cal_.voltage_q_cmd_V();
+    cmd.theta_rate_rad_s = 0.0f;
+    app_->voltage_foc_->Start(cmd);
+
+    foc_ctrl::VoltageFoc::Duties duties;
+    if (app_->voltage_foc_->Step(0.0f, &duties) == false)
+    {
+      app_->voltage_foc_->Stop();
+      app_->l_cal_.Stop();
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->last_current_ = app_->current_adc_->ReadLatest();
+    app_->ObserveDqFromSample(app_->voltage_foc_->theta_rad(),
+                              app_->last_current_);
+    app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    app_->gate_driver_->PowerOn();
+    app_->pwm_output_on_ = true;
+    app_->mode_ = telemetry::xt_can::kModeCal;
+    app_->StartControlIsr();
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (is_bemf)
+  {
+    if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr ||
+        app_->position_loop_.get() == nullptr ||
+        app_->current_loop_.get() == nullptr ||
+        !app_->encoder_pll_.theta_valid())
+    {
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->current_loop_->Stop();
+    app_->position_loop_->Stop();
+    if (app_->voltage_foc_.get() != nullptr)
+    {
+      app_->voltage_foc_->Stop();
+    }
+    app_->phase_pwm_->DisableControlIsr();
+
+    calibration::BemfIdentCal::Options bopts;
+    bopts.resistance_ohm = app_->current_loop_->resistance_ohm();
+    const float max_speed =
+        static_cast<float>(req.omega_elec_mrad_s) * 0.001f;
+    bopts.max_speed_rad_s = (max_speed > 1.0f) ? max_speed : 60.0f;
+    if (req.voltage_mV > 0)
+    {
+      bopts.n_points = static_cast<uint8_t>(
+          req.voltage_mV > 255 ? 255 : req.voltage_mV);
+    }
+    app_->last_cal_kind_ = telemetry::xt_can::kCalSubBemf;
+    app_->bemf_cal_.Start(bopts);
+
+    // moteus velocity mode cold start (mirrors HandleVel), Id forced to 0.
+    app_->SampleEncoder();
+    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
+    app_->position_loop_->Start(foc_ctrl::QuietNan(),
+                                app_->bemf_cal_.velocity_cmd_mech_rad_s(),
+                                0.0f);
+
+    const float theta_elec = app_->enc_theta_elec_rad_;
+    foc_ctrl::CurrentLoop::Command cmd;
+    cmd.theta_rad = theta_elec;
+    cmd.id_A = 0.0f;
+    cmd.iq_A = 0.0f;
+    cmd.theta_rate_rad_s = 0.0f;
+    app_->current_loop_->Start(cmd);
+
+    app_->last_current_ = app_->current_adc_->ReadLatest();
+    foc_ctrl::CurrentLoop::Duties duties;
+    if (app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
+                                  app_->last_current_.i2_A,
+                                  app_->last_current_.i3_A, &duties,
+                                  &theta_elec) == false)
+    {
+      app_->current_loop_->Stop();
+      app_->position_loop_->Stop();
+      app_->bemf_cal_.Stop();
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->id_A_ = app_->current_loop_->id_A();
+    app_->iq_A_ = app_->current_loop_->iq_A();
+    app_->dq_valid_ = app_->last_current_.ok;
+    app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    app_->gate_driver_->PowerOn();
+    app_->pwm_output_on_ = true;
+    app_->mode_ = telemetry::xt_can::kModeCal;
+    app_->StartControlIsr();
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (is_cogging)
+  {
+    if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr ||
+        app_->position_loop_.get() == nullptr ||
+        app_->current_loop_.get() == nullptr ||
+        !app_->encoder_pll_.theta_valid())
+    {
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->current_loop_->Stop();
+    app_->position_loop_->Stop();
+    if (app_->voltage_foc_.get() != nullptr)
+    {
+      app_->voltage_foc_->Stop();
+    }
+    app_->phase_pwm_->DisableControlIsr();
+
+    calibration::CoggingCal::Options copts;
+    const float vel = static_cast<float>(req.omega_elec_mrad_s) * 0.001f;
+    copts.velocity_mech_rad_s = (vel > 0.05f) ? vel : 5.0f;
+    if (req.voltage_mV > 0)
+    {
+      copts.record_revs = static_cast<float>(req.voltage_mV) * 0.01f;
+    }
+    app_->last_cal_kind_ = telemetry::xt_can::kCalSubCogging;
+    app_->cogging_cal_.Start(copts);
+
+    // moteus velocity mode cold start (mirrors HandleVel), Id forced to 0.
+    app_->SampleEncoder();
+    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
+    app_->position_loop_->Start(foc_ctrl::QuietNan(),
+                                app_->cogging_cal_.velocity_cmd_mech_rad_s(),
+                                0.0f);
+
+    const float theta_elec = app_->enc_theta_elec_rad_;
+    foc_ctrl::CurrentLoop::Command cmd;
+    cmd.theta_rad = theta_elec;
+    cmd.id_A = 0.0f;
+    cmd.iq_A = 0.0f;
+    cmd.theta_rate_rad_s = 0.0f;
+    app_->current_loop_->Start(cmd);
+
+    app_->last_current_ = app_->current_adc_->ReadLatest();
+    foc_ctrl::CurrentLoop::Duties duties;
+    if (app_->current_loop_->Step(0.0f, app_->last_current_.i1_A,
+                                  app_->last_current_.i2_A,
+                                  app_->last_current_.i3_A, &duties,
+                                  &theta_elec) == false)
+    {
+      app_->current_loop_->Stop();
+      app_->position_loop_->Stop();
+      app_->cogging_cal_.Stop();
+      return telemetry::xt_can::kStatusFail;
+    }
+    app_->id_A_ = app_->current_loop_->id_A();
+    app_->iq_A_ = app_->current_loop_->iq_A();
+    app_->dq_valid_ = app_->last_current_.ok;
+    app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    app_->gate_driver_->PowerOn();
+    app_->pwm_output_on_ = true;
+    app_->mode_ = telemetry::xt_can::kModeCal;
+    app_->StartControlIsr();
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (app_->encoder_ok_ == false || app_->ma600_.get() == nullptr ||
+      app_->current_loop_.get() == nullptr)
   {
     return telemetry::xt_can::kStatusFail;
   }
@@ -376,44 +628,64 @@ uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
   calibration::EncoderPhaseCal::Options opts;
   opts.method = is_lock ? calibration::EncoderPhaseCal::Method::Lock
                         : calibration::EncoderPhaseCal::Method::Spin;
-  opts.voltage_V = static_cast<float>(req.voltage_mV) * 0.001f;
+  // CalRequest voltage_mV is reused as alignment current in mA for encoder
+  // lock/spin calibration.  The wire layout remains backward compatible.
+  opts.current_A = static_cast<float>(req.voltage_mV) * 0.001f;
   opts.omega_elec_rad_s = static_cast<float>(req.omega_elec_mrad_s) * 0.001f;
   if (opts.omega_elec_rad_s < 0.0f)
   {
     opts.omega_elec_rad_s = -opts.omega_elec_rad_s;
   }
   opts.pole_pairs = board::MotorParams().pole_pairs;
-  opts.mech_revs_each_way = 1.0f;
+  opts.mech_revs_each_way = 2.0f;
   if (is_lock)
   {
-    opts.voltage_V = (opts.voltage_V > 0.05f) ? opts.voltage_V : 1.5f;
+    opts.current_A = (opts.current_A > 0.05f) ? opts.current_A : 1.0f;
     opts.omega_elec_rad_s = 0.0f;
   }
   else
   {
-    opts.voltage_V = (opts.voltage_V > 0.05f) ? opts.voltage_V : 0.8f;
+    opts.current_A = (opts.current_A > 0.05f) ? opts.current_A : 1.0f;
     opts.omega_elec_rad_s =
-        (opts.omega_elec_rad_s > 1.0f) ? opts.omega_elec_rad_s : 80.0f;
+        (opts.omega_elec_rad_s > 1.0f) ? opts.omega_elec_rad_s : 40.0f;
+    if (opts.omega_elec_rad_s > 80.0f)
+    {
+      opts.omega_elec_rad_s = 80.0f;
+    }
+  }
+  if (opts.current_A > 2.0f)
+  {
+    opts.current_A = 2.0f;
   }
 
+  app_->encoder_cal_backup_ = app_->ma600_->options();
+  app_->encoder_cal_backup_valid_ = true;
   // Clear prior offset so calibration sees raw counts.
   app_->ma600_->SetOffsetRad(0.0f);
   app_->ma600_->SetSign(1.0f);
+  app_->ma600_->SetCommutationOffsets(math::CommutationTable{}, false);
   app_->encoder_cal_persisted_ = false;
+  app_->last_cal_kind_ = req.subcmd;
   app_->encoder_cal_.Start(opts);
   app_->cal_last_omega_cmd_ = app_->encoder_cal_.omega_cmd_elec();
 
-  foc_ctrl::VoltageFoc::Command cmd;
+  foc_ctrl::CurrentLoop::Command cmd;
   cmd.theta_rad = 0.0f;
-  cmd.voltage_V = opts.voltage_V;
-  cmd.theta_rate_rad_s = app_->cal_last_omega_cmd_;  // 0 for lock
-  app_->voltage_foc_->Start(cmd);
+  cmd.id_A = opts.current_A;
+  cmd.iq_A = 0.0f;
+  cmd.theta_rate_rad_s = app_->cal_last_omega_cmd_;
+  app_->current_loop_->Start(cmd);
+  app_->current_loop_->SetOmega(0.0f, 0.0f);
 
-  foc_ctrl::VoltageFoc::Duties duties;
-  if (app_->voltage_foc_->Step(0.0f, &duties) == false)
+  app_->last_current_ = app_->current_adc_->ReadLatest();
+  foc_ctrl::CurrentLoop::Duties duties;
+  if (app_->current_loop_->Step(
+          0.0f, app_->last_current_.i1_A, app_->last_current_.i2_A,
+          app_->last_current_.i3_A, &duties) == false)
   {
-    app_->voltage_foc_->Stop();
+    app_->current_loop_->Stop();
     app_->encoder_cal_.Stop();
+    app_->RestoreEncoderCalBackup();
     return telemetry::xt_can::kStatusFail;
   }
   app_->phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);

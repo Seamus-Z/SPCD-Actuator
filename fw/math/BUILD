@@ -3,6 +3,8 @@ cc_library(
     name = "math",
     hdrs = [
         "inc/math/constants.h",
+        "inc/math/commutation.h",
+        "inc/math/cogging.h",
         "inc/math/foc.h",
     ],
     includes = ["inc"],

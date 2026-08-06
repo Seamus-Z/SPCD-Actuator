@@ -1,6 +1,7 @@
 // CRT entry only. Application and modules live in an explicit static pool.
 #include <new>
 
+#include "HAL/system_clock.h"
 #include "application.h"
 #include "pool/pool.h"
 #include "stm32g4xx.h"
@@ -8,8 +9,10 @@
 namespace
 {
 // Raw storage for the pool object itself (constructed after BSS init).
-alignas(::pool::SizedPool<12288>)
-    uint8_t g_pool_storage[sizeof(::pool::SizedPool<12288>)];
+// Cogging-compensation table (1024 int8) plus measurement accumulators live
+// inside Application, so the pool must be sized generously.
+alignas(::pool::SizedPool<40960>)
+    uint8_t g_pool_storage[sizeof(::pool::SizedPool<40960>)];
 
 void FaultLedInit()
 {
@@ -65,7 +68,6 @@ void AppReset(void)
   }
 
   SCB->VTOR = 0x08010000;
-  SystemCoreClock = 16000000;
 
   // Enable CP10/CP11 before any float code (PhaseCurrentAdc ctor uses VFP).
   // Without this, softfp VFP ops HardFault and CAN boot entry is dead.
@@ -73,10 +75,13 @@ void AppReset(void)
   __DSB();
   __ISB();
 
+  // HSI→PLL 170 MHz + moteus bus/periph map (safe if bootloader already did it).
+  hal::SetupSystemClock();
+
   __enable_irq();
 
   // Bare-metal has no global ctor CRT: construct the pool explicitly.
-  auto* pool = new (g_pool_storage) ::pool::SizedPool<12288>();
+  auto* pool = new (g_pool_storage) ::pool::SizedPool<40960>();
   ::pool::PoolPtr<app::Application> application(pool, pool);
   application->Run();
 }

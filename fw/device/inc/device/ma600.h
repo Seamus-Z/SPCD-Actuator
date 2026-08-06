@@ -6,6 +6,7 @@
 #include "HAL/millisecond_timer.h"
 #include "HAL/stm32_spi.h"
 #include "math/constants.h"
+#include "math/commutation.h"
 #include "PinNames.h"
 #include "stm32g4xx_hal.h"
 
@@ -30,6 +31,8 @@ class Ma600
     // Mechanical angle = sign * raw/CPR * 2π + offset.
     float sign = 1.0f;
     float offset_rad = 0.0f;
+    math::CommutationTable commutation_offset_rad{};
+    bool commutation_valid = false;
   };
 
   Ma600(hal::MillisecondTimer* timer, const Options& options)
@@ -106,8 +109,21 @@ class Ma600
     return math::WrapZeroToTwoPi(angle_mech_rad() * pole_pairs);
   }
 
+  float commutation_offset_rad() const
+  {
+    return options_.commutation_valid
+               ? math::InterpolateCommutationOffset(
+                     options_.commutation_offset_rad, angle_counts_rad())
+               : 0.0f;
+  }
+
   void SetOffsetRad(float offset_rad) { options_.offset_rad = offset_rad; }
   void SetSign(float sign) { options_.sign = (sign >= 0.0f) ? 1.0f : -1.0f; }
+  void SetCommutationOffsets(const math::CommutationTable& offsets, bool valid)
+  {
+    options_.commutation_offset_rad = offsets;
+    options_.commutation_valid = valid;
+  }
 
   const Options& options() const { return options_; }
 

@@ -66,11 +66,12 @@ void BL_CanDriver::Init()
 
   fdcan_->CCCR |= FDCAN_CCCR_CCE;
 
-  // 1 Mbps nominal / 2 Mbps data @ 16 MHz PCLK1.
-  fdcan_->NBTP = (3 << FDCAN_NBTP_NSJW_Pos) | (3 << FDCAN_NBTP_NTSEG2_Pos) |
-                 (10 << FDCAN_NBTP_NTSEG1_Pos) | (0 << FDCAN_NBTP_NBRP_Pos);
-  fdcan_->DBTP = (1 << FDCAN_DBTP_DSJW_Pos) | (1 << FDCAN_DBTP_DTSEG2_Pos) |
-                 (4 << FDCAN_DBTP_DTSEG1_Pos) | (0 << FDCAN_DBTP_DBRP_Pos);
+  // 1 Mbps nominal / ~2.024 Mbps data @ 85 MHz PCLK1 (SYSCLK 170, APB1 /2).
+  // Matches app MakeTime() encoding: register fields are (segment - 1).
+  fdcan_->NBTP = (15 << FDCAN_NBTP_NSJW_Pos) | (27 << FDCAN_NBTP_NTSEG2_Pos) |
+                 (55 << FDCAN_NBTP_NTSEG1_Pos) | (0 << FDCAN_NBTP_NBRP_Pos);
+  fdcan_->DBTP = (12 << FDCAN_DBTP_DSJW_Pos) | (12 << FDCAN_DBTP_DTSEG2_Pos) |
+                 (27 << FDCAN_DBTP_DTSEG1_Pos) | (0 << FDCAN_DBTP_DBRP_Pos);
 
   fdcan_->CCCR |= FDCAN_CCCR_FDOE | FDCAN_CCCR_DAR | FDCAN_CCCR_PXHD;
   fdcan_->RXGFC =

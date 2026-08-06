@@ -52,11 +52,11 @@ FDCan::Rate MakeTime(int bitrate, int max_time_seg1, int max_time_seg2)
   FDCan::Rate result;
   result.prescaler = 1;
 
-  // App currently runs from reset HSI; keep SystemCoreClock coherent so
-  // HAL_RCC_GetPCLK1Freq() yields a usable bit-timing base.
+  // Keep SystemCoreClock coherent so HAL_RCC_GetPCLK1Freq() has a base
+  // if SetupSystemClock() was somehow skipped.
   if (SystemCoreClock == 0)
   {
-    SystemCoreClock = 16000000;
+    SystemCoreClock = 170000000;
   }
 
   const uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
@@ -137,7 +137,8 @@ void FDCan::ConfigurePins()
 
 void FDCan::Init()
 {
-  // FDCAN kernel clock: PCLK1 (reset default is HSE, which is not enabled).
+  // FDCAN kernel clock: PCLK1 (SetupSystemClock already selects this; keep
+  // idempotent for init-after-reset paths).
   __HAL_RCC_FDCAN_CLK_ENABLE();
   RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_FDCANSEL_Msk) |
                (2UL << RCC_CCIPR_FDCANSEL_Pos);

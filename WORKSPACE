@@ -38,5 +38,12 @@ mbed_repository(
         "MBED_CONF_RTOS_PRESENT": "0",
         "MBED_CONF_TARGET_LSE_AVAILABLE": "0",
         "NDEBUG": "1",
+
+        # TIM5 is motor PWM (family 3 / x1); move mbed us ticker to TIM15.
+        "MBED_US_TIMER_TIM": "TIM15",
+        "MBED_US_TIMER_TIM_USCORE": "TIM15_",
+        "MBED_US_TIMER_USCORE_TIM": "_TIM15",
+        "TIM_MST_IRQ": "TIM1_BRK_TIM15_IRQn",
+        "TIM_MST_BIT_WIDTH": "16",
     },
 )

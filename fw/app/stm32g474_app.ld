@@ -1,6 +1,6 @@
 /* Bare-metal application linker script for STM32G474
    App lives at 0x08010000 (after bootloader at 0x0800C000) */
-STACK_SIZE = 0x800;
+STACK_SIZE = 0x2000;
 
 MEMORY
 {

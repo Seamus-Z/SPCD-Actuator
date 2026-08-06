@@ -40,7 +40,7 @@ inline constexpr uint8_t kCmdQuery = 8;
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 4;
-inline constexpr uint8_t kFwPatch = 2;
+inline constexpr uint8_t kFwPatch = 17;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -50,8 +50,37 @@ inline constexpr bool UsesCtrlReply(uint8_t cmd)
 }
 
 inline constexpr uint8_t kCalSubAbort = 0;
-inline constexpr uint8_t kCalSubEncPhase = 1;  // spin both ways
-inline constexpr uint8_t kCalSubEncLock = 2;   // hold Vd, ω=0 (recommended)
+inline constexpr uint8_t kCalSubEncPhase = 1;  // bidirectional 64-bin mapping
+inline constexpr uint8_t kCalSubEncLock = 2;   // coarse global offset only
+// Encoder lock/spin reuse CalRequest voltage_mV as alignment current [mA].
+// The field name is retained to preserve the packed wire ABI.
+// Closed-loop Ke (back-EMF constant) identification: velocity sweep +
+// Vq/Iq regression. Requires encoder phase already calibrated. CalRequest
+// reuses omega_elec_mrad_s as the sweep's top mech speed [mrad/s];
+// voltage_mV as sweep point count (0 => firmware default, else 3..8).
+// CalTelem reuses offset_mrad for Ke*1e6 [µV·s/rad] and residual_mrad
+// for fit r²*1e6 (see BuildCalTelem()).
+inline constexpr uint8_t kCalSubBemf = 3;
+// Closed-loop R (phase resistance) identification: Id sweep at fixed
+// theta=0, no encoder needed. CalRequest reuses omega_elec_mrad_s as the
+// sweep's top Id current [mA]; voltage_mV as sweep point count (0 =>
+// firmware default, else 3..8). CalTelem reuses offset_mrad for R*1e6
+// [µΩ] and residual_mrad for fit r²*1e6.
+inline constexpr uint8_t kCalSubResistance = 4;
+// Locked-rotor D/Q inductance identification. Requires R already known.
+// CalRequest reuses voltage_mV as the step voltage [mV] (0 => firmware
+// default); omega_elec_mrad_s as per-axis trial count (0 => firmware default,
+// else 3..8). CalTelem reuses offset_mrad for Ld*1e9 [nH] and
+// residual_mrad for Lq*1e9 [nH].
+inline constexpr uint8_t kCalSubInductance = 5;
+// Cogging-torque compensation measurement: slow constant-velocity forward +
+// reverse spin, records the torque current per rotor position and stores a
+// moteus-style int8 feed-forward table. Requires encoder phase already
+// calibrated. CalRequest reuses omega_elec_mrad_s as the sweep speed
+// [mech mrad/s] (0 => firmware default); voltage_mV as record revolutions
+// x100 (0 => firmware default). CalTelem reuses offset_mrad for the table
+// scale (peak A) *1e6 and residual_mrad for peak current *1e6.
+inline constexpr uint8_t kCalSubCogging = 6;
 
 inline constexpr uint8_t kStatusOk = 0;
 inline constexpr uint8_t kStatusBadLen = 1;
@@ -90,19 +119,29 @@ inline constexpr uint8_t kCalStateRev = 3;
 inline constexpr uint8_t kCalStateDone = 4;
 inline constexpr uint8_t kCalStateFailed = 5;
 inline constexpr uint8_t kCalStateLocking = 6;
+inline constexpr uint8_t kCalStateBemfRun = 7;  // kCalSubBemf: sweeping/sampling
+inline constexpr uint8_t kCalStateRRun = 8;     // kCalSubResistance: sweeping
+inline constexpr uint8_t kCalStateLRun = 9;     // kCalSubInductance: stepping
+inline constexpr uint8_t kCalStateCoggingRun = 10;  // kCalSubCogging: spinning
 
-// Snapshot (PWM-rate burst). Channels packed as int16 mA in order:
-// Id, Iq, I1, I2, I3 when mask == kSnapChDefault.
+// Snapshot (PWM-rate burst). Channels packed as int16 mA / mrad in order:
+// Id, Iq, I1, I2, I3, theta_mech_mrad, theta_elec_mrad.
+// theta_* are milli-radians (int16 wraps every ~6.28 rad mech; the host
+// unwraps by per-channel delta accumulation, same as before for currents).
 inline constexpr uint16_t kSnapChId = 1u << 0;
 inline constexpr uint16_t kSnapChIq = 1u << 1;
 inline constexpr uint16_t kSnapChI1 = 1u << 2;
 inline constexpr uint16_t kSnapChI2 = 1u << 3;
 inline constexpr uint16_t kSnapChI3 = 1u << 4;
+inline constexpr uint16_t kSnapChThetaMech = 1u << 5;
+inline constexpr uint16_t kSnapChThetaElec = 1u << 6;
 inline constexpr uint16_t kSnapChDefault =
-    kSnapChId | kSnapChIq | kSnapChI1 | kSnapChI2 | kSnapChI3;
+    kSnapChId | kSnapChIq | kSnapChI1 | kSnapChI2 | kSnapChI3 |
+    kSnapChThetaMech | kSnapChThetaElec;
 inline constexpr uint16_t kSnapMaxSamples = 512;
-inline constexpr uint8_t kSnapChannelCount = 5;
-inline constexpr uint8_t kSnapSamplesPerFrame = 5;  // 5*5*i16 = 50 B payload
+inline constexpr uint8_t kSnapChannelCount = 7;
+// 7 ch * 2 B = 14 B/sample; 4 samples/frame = 56 B fits a 64 B FD frame.
+inline constexpr uint8_t kSnapSamplesPerFrame = 4;
 
 #pragma pack(push, 1)
 
@@ -198,7 +237,9 @@ struct CtrlReply
   uint16_t bus_mV;
   uint16_t enc_raw;
   int32_t theta_mech_mrad;
-  int32_t reserved2;
+  int32_t omega_cmd_mrad_s;
+  int32_t omega_elec_mrad_s;
+  int32_t voltage_headroom_mV;
 } __attribute__((packed));
 
 // Host -> device: after cmd byte for kCmdCal.
@@ -206,7 +247,7 @@ struct CalRequest
 {
   uint8_t subcmd;        // kCalSub*
   uint8_t reserved;
-  int32_t voltage_mV;    // encoder-phase open-loop V
+  int32_t voltage_mV;    // subcommand-dependent value; see kCalSub* comments
   int32_t omega_elec_mrad_s;
 } __attribute__((packed));
 
@@ -266,15 +307,15 @@ static_assert(sizeof(Info) == 34, "Info size");
 static_assert(sizeof(Telemetry) == 60, "Telemetry size");
 // hdr4 + raw2 + mech4 + elec4 + sign1 + ok1 + pad2 = 18
 static_assert(sizeof(EncTelem) == 18, "EncTelem size");
-// hdr4 + cmd/status/flags/mode/enc + currents + angles/V + bus/raw + mech + pad = 56
-static_assert(sizeof(CtrlReply) == 56, "CtrlReply size");
+// Original 56-byte reply plus command ω, electrical ω, and voltage headroom.
+static_assert(sizeof(CtrlReply) == 64, "CtrlReply size");
 static_assert(sizeof(CalRequest) == 10, "CalRequest size");
 // hdr4 + kind1 + state1 + pm2 + offset4 + resid4 + sign1 + ok1 + samples2 = 20
 static_assert(sizeof(CalTelem) == 20, "CalTelem size");
 static_assert(sizeof(SnapRequest) == 6, "SnapRequest size");
 static_assert(sizeof(SnapMeta) == 16, "SnapMeta size");
-// hdr4 + idx2 + n1 + r1 + 5*5*i16 = 8 + 50 = 58
-static_assert(sizeof(SnapData) == 58, "SnapData size");
+// hdr4 + idx2 + n1 + r1 + 4*7*i16 = 8 + 56 = 64
+static_assert(sizeof(SnapData) == 64, "SnapData size");
 
 }  // namespace xt_can
 }  // namespace telemetry

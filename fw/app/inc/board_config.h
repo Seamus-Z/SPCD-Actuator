@@ -113,7 +113,7 @@ inline device::Ma600::Options Ma600Options()
 inline foc_ctrl::EncoderPll::Options EncoderPllOptions()
 {
   foc_ctrl::EncoderPll::Options options;
-  options.pll_filter_hz = 400.0f;
+  options.pll_filter_hz = 200.0f;
   options.pole_pairs = MotorParams().pole_pairs;
   return options;
 }
@@ -127,10 +127,25 @@ inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
   return options;
 }
 
-// Ke [V·s/rad mech] from vendor Vpeak/krpm.
+// Vendor Ke is line-to-line peak. CurrentLoop uses phase/dq peak voltage,
+// therefore convert by 1/sqrt(3) before applying BEMF feedforward.
 inline float BemfVPerMechRadS(const device::motor::Params& motor)
 {
-  return motor.bemf_Vpeak_per_krpm * (60.0f / 1000.0f) / math::k2Pi;
+  return motor.bemf_Vpeak_per_krpm * (60.0f / 1000.0f) /
+      (math::k2Pi * math::kSqrt3);
+}
+
+// For the amplitude-invariant 2/3 Park transform, Kt = 3/2 * Ke_dq.
+inline float VendorTorqueConstantNmPerA(const device::motor::Params& motor)
+{
+  return 1.5f * BemfVPerMechRadS(motor);
+}
+
+// BemfIdentCal measures phase/dq Vq per mechanical rad/s. With the
+// amplitude-invariant 2/3 Park transform, Kt = 3/2 * Ke_dq.
+inline float IdentifiedTorqueConstantNmPerA(float ke_dq_v_s_per_rad)
+{
+  return 1.5f * ke_dq_v_s_per_rad;
 }
 
 inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
@@ -140,32 +155,38 @@ inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
   options.bus_V = kBusVoltage_V;
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
-  options.kp_d = motor.id_kp;
-  options.kp_q = motor.iq_kp;
-  // Vendor I-gains are per PWM cycle @ ~15–20 kHz → continuous 1/s.
-  constexpr float kPwmHz = 15000.0f;
-  options.ki_d = motor.id_ki * kPwmHz;
-  options.ki_q = motor.iq_ki * kPwmHz;
+  constexpr float kCurrentLoopHz = 200.0f;
+  const float current_loop_w = math::k2Pi * kCurrentLoopHz;
+  options.kp_d = current_loop_w * motor.phase_inductance_H;
+  options.kp_q = current_loop_w * motor.phase_inductance_H;
+  options.ki_d = current_loop_w * motor.phase_resistance_ohm;
+  options.ki_q = current_loop_w * motor.phase_resistance_ohm;
+  options.max_current_desired_rate_A_s = 10000.0f;
   options.max_current_A = motor.max_phase_current_A;
   options.resistance_ohm = motor.phase_resistance_ohm;
-  options.inductance_H = motor.phase_inductance_H;
+  options.inductance_d_H = motor.phase_inductance_H;
+  options.inductance_q_H = motor.phase_inductance_H;
   options.v_per_hz = BemfVPerMechRadS(motor);
+  options.bemf_feedforward = 1.0f;
+  // Transport delay ~= 1.5 PWM periods (sample->apply) plus the MA600 group
+  // delay; advance commutation by omega_elec * this to keep Id from leaking
+  // at speed. Tune by watching Id at high speed if needed.
+  options.phase_lead_s =
+      1.5f / static_cast<float>(PhasePwmOptions().rate_hz) + 64.0e-6f;
   return options;
 }
 
-// moteus servo.pid_position defaults (rev units inside PositionLoop).
+// Position/velocity gains from the known-good moteus setup for this motor.
 inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
 {
   const auto& motor = MotorParams();
   foc_ctrl::PositionLoop::Options options;
-  // moteus pid_position is Nm/rev and Nm/(rev/s); PositionLoop uses turns.
-  options.pid.kp = 4.0f;
-  options.pid.ki = 0.0f;
-  options.pid.kd = 0.05f;
-  options.pid.ilimit = 0.0f;
+  options.pid.kp = 0.04f;
+  options.pid.ki = 0.003f;
+  options.pid.kd = 0.02f;
+  options.pid.ilimit = 0.3f;
   options.pid.sign = -1;
-  // Kt ≈ Ke for PMSM; clamp Iq for first bring-up.
-  options.torque_constant_Nm_A = BemfVPerMechRadS(motor);
+  options.torque_constant_Nm_A = VendorTorqueConstantNmPerA(motor);
   if (options.torque_constant_Nm_A < 0.05f)
   {
     options.torque_constant_Nm_A = 0.1f;
@@ -177,7 +198,13 @@ inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
   }
   options.max_torque_Nm =
       options.torque_constant_Nm_A * options.max_iq_A;
-  options.velocity_threshold = 0.5f;
+  options.acceleration_limit_rad_s2 = 15.0f * math::k2Pi;
+  // 200 rad/s is below the 48 V DQ voltage limit for this motor. Retain an
+  // explicit ceiling so invalid host commands cannot accelerate without bound.
+  options.max_velocity_cmd_rad_s =
+      motor.fw_speed_rpm * (math::k2Pi / 60.0f);
+  options.max_position_slip_rad = math::kPi;
+  options.max_velocity_error_rad_s = 100.0f;
   return options;
 }
 

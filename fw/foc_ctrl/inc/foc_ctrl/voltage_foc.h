@@ -7,6 +7,10 @@
 #include "math/constants.h"
 #include "math/foc.h"
 
+
+extern "C" {
+float sqrtf(float);
+}
 namespace foc_ctrl
 {
 
@@ -24,6 +28,7 @@ class VoltageFoc
   {
     float theta_rad = 0.0f;
     float voltage_V = 0.0f;
+    float q_voltage_V = 0.0f;
     float theta_rate_rad_s = 0.0f;
   };
 
@@ -40,6 +45,7 @@ class VoltageFoc
   {
     theta_ = math::WrapZeroToTwoPi(cmd.theta_rad);
     voltage_ = cmd.voltage_V;
+    q_voltage_ = cmd.q_voltage_V;
     theta_rate_ = cmd.theta_rate_rad_s;
     active_ = true;
   }
@@ -48,10 +54,17 @@ class VoltageFoc
 
   void SetThetaRate(float theta_rate_rad_s) { theta_rate_ = theta_rate_rad_s; }
   void SetVoltage(float voltage_V) { voltage_ = voltage_V; }
+  void SetQVoltage(float voltage_V) { q_voltage_ = voltage_V; }
+  void SetDqVoltage(float d_voltage_V, float q_voltage_V)
+  {
+    voltage_ = d_voltage_V;
+    q_voltage_ = q_voltage_V;
+  }
 
   bool active() const { return active_; }
   float theta_rad() const { return theta_; }
   float voltage_V() const { return voltage_; }
+  float q_voltage_V() const { return q_voltage_; }
   float theta_rate_rad_s() const { return theta_rate_; }
   float bus_V() const { return options_.bus_V; }
 
@@ -82,6 +95,7 @@ class VoltageFoc
     const float max_voltage =
         (0.5f - options_.min_duty) * options_.bus_V * math::kSvpwmRatio;
     float vd = voltage_;
+    float vq = q_voltage_;
     if (vd > max_voltage)
     {
       vd = max_voltage;
@@ -90,10 +104,23 @@ class VoltageFoc
     {
       vd = -max_voltage;
     }
+    float q_limit_sq = max_voltage * max_voltage - vd * vd;
+    if (q_limit_sq < 0.0f)
+    {
+      q_limit_sq = 0.0f;
+    }
+    const float q_limit = sqrtf(q_limit_sq);
+    if (vq > q_limit)
+    {
+      vq = q_limit;
+    }
+    else if (vq < -q_limit)
+    {
+      vq = -q_limit;
+    }
 
     const math::SinCos sc = math::SinCosFromRadians(theta_);
-    const math::InverseDqTransform idt(sc, vd, 0.0f);
-
+    const math::InverseDqTransform idt(sc, vd, vq);
     math::BalancedPwm pwm;
     if (!math::BalancedPwm::FromPhaseVolts(idt.a, idt.b, idt.c, options_.bus_V,
                                           options_.min_duty, options_.max_duty,
@@ -127,6 +154,7 @@ class VoltageFoc
   bool active_ = false;
   float theta_ = 0.0f;
   float voltage_ = 0.0f;
+  float q_voltage_ = 0.0f;
   float theta_rate_ = 0.0f;
 };
 

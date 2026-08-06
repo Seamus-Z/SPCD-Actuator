@@ -54,7 +54,7 @@ class SnapshotCapture
 
   // Called from control ISR (PWM rate).
   void PushIsr(float id_A, float iq_A, float i1_A, float i2_A, float i3_A,
-               uint32_t dt_us)
+               float theta_mech_rad, float theta_elec_rad, uint32_t dt_us)
   {
     if (state_ != State::Capturing)
     {
@@ -74,7 +74,10 @@ class SnapshotCapture
     row[2] = ToMilli16(i1_A);
     row[3] = ToMilli16(i2_A);
     row[4] = ToMilli16(i3_A);
+    row[5] = ToMilli16(theta_mech_rad * 1000.0f);
+    row[6] = ToMilli16(theta_elec_rad * 1000.0f);
     duration_us_ += dt_us * decimate_;
+    dt_total_us_ += dt_us * decimate_;
     ++count_;
     if (count_ >= target_)
     {
@@ -104,7 +107,18 @@ class SnapshotCapture
   {
     meta->hdr.seq = seq;
     meta->n_samples = count_;
-    meta->sample_hz = sample_hz_ / (decimate_ ? decimate_ : 1);
+    // Report the MEASURED average ISR rate (dt accumulated in PushIsr) instead
+    // of the nominal 15000, so the host frequency analysis is correct even if
+    // the real control rate differs (clock/PLL configuration).
+    if (count_ > 0 && dt_total_us_ > 0)
+    {
+      const uint32_t avg_us = static_cast<uint32_t>(dt_total_us_ / count_);
+      meta->sample_hz = (avg_us > 0) ? (1000000u / avg_us) : sample_hz_;
+    }
+    else
+    {
+      meta->sample_hz = sample_hz_ / (decimate_ ? decimate_ : 1);
+    }
     meta->channel_mask = telemetry::xt_can::kSnapChDefault;
     meta->channels = telemetry::xt_can::kSnapChannelCount;
     meta->decimate = decimate_;
@@ -168,6 +182,7 @@ class SnapshotCapture
   uint8_t decimate_ = 1;
   uint8_t decim_count_ = 0;
   uint16_t sample_hz_ = 15000;
+  uint64_t dt_total_us_ = 0;
   uint32_t duration_us_ = 0;
   int16_t buf_[telemetry::xt_can::kSnapMaxSamples *
                telemetry::xt_can::kSnapChannelCount] = {};

@@ -241,10 +241,12 @@ void PhaseCurrentAdc::ConfigureAdcCommon()
   __HAL_RCC_ADC12_CLK_ENABLE();
   __HAL_RCC_ADC345_CLK_ENABLE();
 
-  // AHB/2 sync clock. Keep DUAL=0; simultaneous start via LPTIM satisfies
-  // ES0430 §2.7.11 without dual-mode register coupling.
-  ADC12_COMMON->CCR = (2u << ADC_CCR_CKMODE_Pos);
-  ADC345_COMMON->CCR = (2u << ADC_CCR_CKMODE_Pos);
+  // AHB/4 sync clock (CKMODE=3): 170 MHz / 4 = 42.5 MHz, inside the G4 ADC
+  // max of 50 MHz. At the old 16 MHz clock AHB/2 was 8 MHz and fine, but
+  // 170 MHz / 2 = 85 MHz would exceed the ADC limit. Keep DUAL=0;
+  // simultaneous start via LPTIM satisfies ES0430 §2.7.11.
+  ADC12_COMMON->CCR = (3u << ADC_CCR_CKMODE_Pos);
+  ADC345_COMMON->CCR = (3u << ADC_CCR_CKMODE_Pos);
 }
 
 void PhaseCurrentAdc::DisableOneAdc(ADC_TypeDef* adc)

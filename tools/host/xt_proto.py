@@ -31,6 +31,10 @@ CMD_QUERY = 8
 CAL_SUB_ABORT = 0
 CAL_SUB_ENC_PHASE = 1
 CAL_SUB_ENC_LOCK = 2
+CAL_SUB_BEMF_IDENT = 3  # closed-loop Ke sweep; see xt_can.h kCalSubBemf
+CAL_SUB_RESISTANCE = 4  # Id sweep; see xt_can.h kCalSubResistance
+CAL_SUB_INDUCTANCE = 5  # Vd step response; see xt_can.h kCalSubInductance
+CAL_SUB_COGGING = 6     # slow spin q-current map; see xt_can.h kCalSubCogging
 
 STATUS_OK = 0
 STATUS_BAD_LEN = 1
@@ -38,11 +42,12 @@ STATUS_BAD_CMD = 2
 STATUS_NOT_RUN = 3
 STATUS_FAIL = 4
 
-SNAP_CH_DEFAULT = 0x1F
+SNAP_CH_DEFAULT = 0x7F
 SNAP_MAX_SAMPLES = 512
-SNAP_CHANNELS = 5
-SNAP_SAMPLES_PER_FRAME = 5
-SNAP_CHANNEL_KEYS = ["id_a", "iq_a", "i1_a", "i2_a", "i3_a"]
+SNAP_CHANNELS = 7
+SNAP_SAMPLES_PER_FRAME = 4
+SNAP_CHANNEL_KEYS = ["id_a", "iq_a", "i1_a", "i2_a", "i3_a",
+                     "theta_mech_rad", "theta_elec_rad"]
 
 FLAG_PWM_ON = 1 << 0
 FLAG_CISR = 1 << 1
@@ -121,30 +126,83 @@ def pack_vel(omega_mech_rad_s: float, id_a: float = 0.0, seq: int = 0) -> bytes:
 
 
 def pack_cal_enc(
-    voltage_v: float = 1.5,
+    current_a: float = 1.0,
     omega_elec_rad_s: float = 40.0,
     seq: int = 0,
 ) -> bytes:
-    """Start encoder spin calibration (both directions)."""
+    """Start current-regulated encoder spin calibration (both directions)."""
     return pack_header(TYPE_CMD, seq) + struct.pack(
         "<BBBii",
         CMD_CAL,
         CAL_SUB_ENC_PHASE,
         0,
-        int(round(voltage_v * 1000)),
+        int(round(current_a * 1000)),
         int(round(omega_elec_rad_s * 1000)),
     )
 
 
-def pack_cal_lock(voltage_v: float = 1.5, seq: int = 0) -> bytes:
-    """Start encoder lock calibration (hold Vd, omega=0) — recommended."""
+def pack_cal_lock(current_a: float = 1.0, seq: int = 0) -> bytes:
+    """Start current-regulated coarse encoder lock calibration."""
     return pack_header(TYPE_CMD, seq) + struct.pack(
         "<BBBii",
         CMD_CAL,
         CAL_SUB_ENC_LOCK,
         0,
-        int(round(voltage_v * 1000)),
+        int(round(current_a * 1000)),
         0,
+    )
+
+
+def pack_cal_bemf(
+    max_speed_rad_s: float = 60.0, n_points: int = 0, seq: int = 0
+) -> bytes:
+    """Start closed-loop Ke identification (velocity sweep, Id=0).
+
+    Requires encoder phase already calibrated (run cal_lock/cal_enc first).
+    n_points: 0 => firmware default (5); else clamped to 3..8 on-device.
+    """
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_BEMF_IDENT,
+        0,
+        int(n_points),
+        int(round(max_speed_rad_s * 1000)),
+    )
+
+
+def pack_cal_r(
+    max_current_a: float = 1.5, n_points: int = 0, seq: int = 0
+) -> bytes:
+    """Start closed-loop R (phase resistance) identification (Id sweep).
+
+    No encoder required. n_points: 0 => firmware default (5), else 3..8.
+    """
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_RESISTANCE,
+        0,
+        int(n_points),
+        int(round(max_current_a * 1000)),
+    )
+
+
+def pack_cal_l(
+    step_voltage_v: float = 3.0, n_trials: int = 0, seq: int = 0
+) -> bytes:
+    """Start locked-rotor D/Q inductance identification.
+
+    No encoder required. Uses the currently-effective R, measures Ld and Lq,
+    and stores both. Identify R first. n_trials applies to each axis.
+    """
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_INDUCTANCE,
+        0,
+        int(round(step_voltage_v * 1000)),
+        int(n_trials),
     )
 
 
@@ -156,6 +214,24 @@ def pack_cal_abort(seq: int = 0) -> bytes:
         0,
         0,
         0,
+    )
+
+def pack_cal_cogging(
+    velocity_mech_rad_s: float = 1.0, record_revs: float = 0.0, seq: int = 0
+) -> bytes:
+    """Start cogging-torque compensation measurement (slow fwd/rev spin).
+
+    Requires encoder phase already calibrated and a working velocity loop.
+    velocity_mech_rad_s: constant sweep speed. record_revs: 0 => firmware
+    default (1 rev/direction).
+    """
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        "<BBBii",
+        CMD_CAL,
+        CAL_SUB_COGGING,
+        0,
+        int(round(record_revs * 100)),          # voltage_mV field reused
+        int(round(velocity_mech_rad_s * 1000)),  # omega_elec_mrad_s reused
     )
 
 
@@ -260,6 +336,8 @@ class CtrlReply:
     enc_raw: int
     theta_mech_rad: float
     omega_cmd_rad_s: float = 0.0
+    omega_elec_rad_s: float = 0.0
+    voltage_headroom_v: float = 0.0
 
     @property
     def pwm_on(self) -> bool:
@@ -394,9 +472,12 @@ assert struct.calcsize(_ENC_FMT) == 18
 _CAL_FMT = "<BBBBBBHiibBH"
 assert struct.calcsize(_CAL_FMT) == 20
 
-# hdr4 + cmd/status + flags + mode/enc + 4*i32 I + 4*i32 ang/V + bus/raw + mech + pad = 56
-_CTRL_FMT = "<BBBBBBHBBbBiiiiiiiiHHii"
-assert struct.calcsize(_CTRL_FMT) == 56
+# The first 56 bytes retain the original layout. Firmware >=0.4.10 appends
+# measured electrical speed and available DQ voltage headroom (64 bytes total).
+_CTRL_BASE_FMT = "<BBBBBBHBBbBiiiiiiiiHHii"
+_CTRL_FMT = _CTRL_BASE_FMT + "ii"
+assert struct.calcsize(_CTRL_BASE_FMT) == 56
+assert struct.calcsize(_CTRL_FMT) == 64
 
 
 def parse_frame(data: bytes) -> Optional[object]:
@@ -442,6 +523,12 @@ def parse_frame(data: bytes) -> Optional[object]:
         ch = SNAP_CHANNELS
         need = 8 + n * ch * 2
         if len(data) < need or n > SNAP_SAMPLES_PER_FRAME:
+            import sys as _sys
+            _sys.stderr.write(
+                f"[SNAPDUMP] REJECT len={len(data)} n={n} ch={ch} "
+                f"need={need} maxn={SNAP_SAMPLES_PER_FRAME} "
+                f"start={start_index} bytes={list(data[:16])}\n")
+            _sys.stderr.flush()
             return None
         count = n * ch
         samples = list(struct.unpack_from("<" + "h" * count, data, 8))
@@ -479,7 +566,8 @@ def parse_frame(data: bytes) -> Optional[object]:
             ok=bool(fields[8]),
         )
     if typ == TYPE_CTRL_REPLY and len(data) >= 56:
-        fields = struct.unpack_from(_CTRL_FMT, data, 0)
+        ctrl_fmt = _CTRL_FMT if len(data) >= 64 else _CTRL_BASE_FMT
+        fields = struct.unpack_from(ctrl_fmt, data, 0)
         return CtrlReply(
             seq=fields[3],
             cmd=fields[4],
@@ -500,16 +588,31 @@ def parse_frame(data: bytes) -> Optional[object]:
             enc_raw=fields[20],
             theta_mech_rad=fields[21] / 1000.0,
             omega_cmd_rad_s=fields[22] / 1000.0,
+            omega_elec_rad_s=fields[23] / 1000.0 if len(fields) > 23 else 0.0,
+            voltage_headroom_v=fields[24] / 1000.0 if len(fields) > 24 else 0.0,
         )
     if typ == TYPE_CAL and len(data) >= 20:
         fields = struct.unpack_from(_CAL_FMT, data, 0)
+        kind = fields[4]
+        # Field reuse per kind (see xt_can.h kCalSub* docs):
+        #   Bemf: offset=Ke_dq*1e6 [V*s/rad], residual=r^2*1e6
+        #   Resistance: offset=R*1e6 [uOhm], residual=r^2*1e6
+        #   Inductance: offset=Ld*1e9 [nH], residual=Lq*1e9 [nH]
+        #   everything else (enc phase/lock): milli-units
+        # Cogging: offset=table scale (A) *1e6, residual=peak current (A) *1e6
+        if kind in (CAL_SUB_BEMF_IDENT, CAL_SUB_RESISTANCE, CAL_SUB_COGGING):
+            off_scale = res_scale = 1.0e6
+        elif kind == CAL_SUB_INDUCTANCE:
+            off_scale = res_scale = 1.0e9
+        else:
+            off_scale = res_scale = 1000.0
         return CalTelem(
             seq=fields[3],
-            kind=fields[4],
+            kind=kind,
             state=fields[5],
             progress=fields[6] / 1000.0,
-            offset_rad=fields[7] / 1000.0,
-            residual_rad=fields[8] / 1000.0,
+            offset_rad=fields[7] / off_scale,
+            residual_rad=fields[8] / res_scale,
             sign=fields[9],
             ok=bool(fields[10]),
             samples=fields[11],
