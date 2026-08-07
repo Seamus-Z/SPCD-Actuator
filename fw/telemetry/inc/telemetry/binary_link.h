@@ -31,8 +31,8 @@ class BinaryLink
   void SendCtrlReply(const xt_can::CtrlReply& reply);
   void SendAck(uint8_t cmd, uint8_t seq, uint8_t status);
   void SendInfo(const xt_can::Info& info);
-  void SendSnapMeta(const xt_can::SnapMeta& meta);
-  void SendSnapData(const xt_can::SnapData& data);
+  bool SendSnapMeta(const xt_can::SnapMeta& meta);
+  bool SendSnapData(const xt_can::SnapData& data);
 
   uint8_t node_id() const { return node_id_; }
   uint16_t cmd_id() const { return xt_can::CmdId(node_id_); }

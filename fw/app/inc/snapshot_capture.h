@@ -48,6 +48,7 @@ class SnapshotCapture
     decim_count_ = 0;
     send_index_ = 0;
     duration_us_ = 0;
+    dt_total_us_ = 0;
     state_ = State::Capturing;
     return true;
   }
@@ -74,8 +75,9 @@ class SnapshotCapture
     row[2] = ToMilli16(i1_A);
     row[3] = ToMilli16(i2_A);
     row[4] = ToMilli16(i3_A);
-    row[5] = ToMilli16(theta_mech_rad * 1000.0f);
-    row[6] = ToMilli16(theta_elec_rad * 1000.0f);
+    // ToMilli16() already scales by 1e3. Pass radians so wire units are mrad.
+    row[5] = ToMilli16(theta_mech_rad);
+    row[6] = ToMilli16(theta_elec_rad);
     duration_us_ += dt_us * decimate_;
     dt_total_us_ += dt_us * decimate_;
     ++count_;
@@ -125,8 +127,9 @@ class SnapshotCapture
     meta->duration_us = duration_us_;
   }
 
-  // Fill one SnapData frame; returns false when done.
-  bool FillDataFrame(telemetry::xt_can::SnapData* out, uint8_t seq)
+  // Fill one SnapData frame from send_index_ without advancing.
+  // Caller must AdvanceSend() only after the CAN TX succeeds.
+  bool FillDataFrame(telemetry::xt_can::SnapData* out, uint8_t seq) const
   {
     if (state_ != State::Sending || send_index_ >= count_)
     {
@@ -156,8 +159,17 @@ class SnapshotCapture
     {
       out->samples[i] = 0;
     }
-    send_index_ = static_cast<uint16_t>(send_index_ + n);
     return true;
+  }
+
+  void AdvanceSend(uint8_t n)
+  {
+    send_index_ = static_cast<uint16_t>(send_index_ + n);
+  }
+
+  bool SendComplete() const
+  {
+    return state_ == State::Sending && send_index_ >= count_;
   }
 
  private:

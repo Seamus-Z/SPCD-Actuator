@@ -104,7 +104,11 @@ inline device::Ma600::Options Ma600Options()
   options.sck = PF_1;
   options.cs = PB_7;
   options.frequency_hz = 6000000;
-  options.filter_us = 64;
+  // 14 pole-pairs @ 200 rad/s ⇒ ~445 Hz electrical. moteus' 1024 us default
+  // is too slow here: with matched phase_lead it advances ~180° at 200 rad/s
+  // and the motor stalls around ~80. 160 us keeps noise down without eating
+  // the entire torque budget at top speed.
+  options.filter_us = 160;
   options.sign = 1.0f;
   options.offset_rad = 0.0f;
   return options;
@@ -113,8 +117,13 @@ inline device::Ma600::Options Ma600Options()
 inline foc_ctrl::EncoderPll::Options EncoderPllOptions()
 {
   foc_ctrl::EncoderPll::Options options;
-  options.pll_filter_hz = 200.0f;
+  // moteus SourceConfig default pll_filter_hz = 400 (3 dB cutoff).
+  options.pll_filter_hz = 400.0f;
   options.pole_pairs = MotorParams().pole_pairs;
+  // Hard cap well above fw_speed so a SPI/angle glitch cannot report
+  // tens of thousands of rad/s into the velocity loop.
+  options.max_velocity_mech_rad_s =
+      MotorParams().fw_speed_rpm * (math::k2Pi / 60.0f) * 1.5f;
   return options;
 }
 
@@ -169,22 +178,27 @@ inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
   options.v_per_hz = BemfVPerMechRadS(motor);
   options.bemf_feedforward = 1.0f;
   // Transport delay ~= 1.5 PWM periods (sample->apply) plus the MA600 group
-  // delay; advance commutation by omega_elec * this to keep Id from leaking
-  // at speed. Tune by watching Id at high speed if needed.
+  // delay. Keep this tied to Ma600Options().filter_us so the two cannot drift
+  // apart again (64us lead with 1024us filter → 60 rad/s runaway; 1124us lead
+  // with 1024us filter → ~80 rad/s ceiling).
   options.phase_lead_s =
-      1.5f / static_cast<float>(PhasePwmOptions().rate_hz) + 64.0e-6f;
+      1.5f / static_cast<float>(PhasePwmOptions().rate_hz) +
+      static_cast<float>(Ma600Options().filter_us) * 1.0e-6f;
   return options;
 }
 
-// Position/velocity gains from the known-good moteus setup for this motor.
+// moteus-style position PID units: Nm/turn and Nm/(turn/s).
+// kp=0.04 was far too soft (≈7.5 turns of velocity-integrator windup before
+// torque limit) and produced surge/reverse when the slip clamp chased an
+// encoder/PLL spike. Restore the prior Nm/turn gains and keep a tight slip.
 inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
 {
   const auto& motor = MotorParams();
   foc_ctrl::PositionLoop::Options options;
-  options.pid.kp = 0.04f;
-  options.pid.ki = 0.003f;
-  options.pid.kd = 0.02f;
-  options.pid.ilimit = 0.3f;
+  options.pid.kp = 4.0f;
+  options.pid.ki = 0.0f;
+  options.pid.kd = 0.05f;
+  options.pid.ilimit = 0.0f;
   options.pid.sign = -1;
   options.torque_constant_Nm_A = VendorTorqueConstantNmPerA(motor);
   if (options.torque_constant_Nm_A < 0.05f)
@@ -199,12 +213,16 @@ inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
   options.max_torque_Nm =
       options.torque_constant_Nm_A * options.max_iq_A;
   options.acceleration_limit_rad_s2 = 15.0f * math::k2Pi;
+  // Soften D when |ω_meas - ω_cmd| is small so encoder noise does not jitter Iq.
+  options.velocity_threshold = 0.5f;
   // 200 rad/s is below the 48 V DQ voltage limit for this motor. Retain an
   // explicit ceiling so invalid host commands cannot accelerate without bound.
   options.max_velocity_cmd_rad_s =
       motor.fw_speed_rpm * (math::k2Pi / 60.0f);
   options.max_position_slip_rad = math::kPi;
-  options.max_velocity_error_rad_s = 100.0f;
+  // Keep the virtual trajectory close to the rotor. 100 rad/s let a single
+  // encoder spike yank the command to ~cmd±100 and cause surge/reverse.
+  options.max_velocity_error_rad_s = 8.0f;
   return options;
 }
 

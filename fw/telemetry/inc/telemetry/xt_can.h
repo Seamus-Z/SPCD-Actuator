@@ -225,7 +225,9 @@ struct CtrlReply
   uint8_t mode;
   uint8_t enc_ok;
   int8_t enc_sign;
-  uint8_t reserved;
+  // Sticky encoder/PLL glitch count, saturating at 255. Climbs when the PLL
+  // sees a large one-sample angle jump or hits its absolute velocity clamp.
+  uint8_t enc_spike;
   int32_t id_mA;
   int32_t iq_mA;
   int32_t idref_mA;

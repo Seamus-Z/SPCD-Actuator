@@ -94,22 +94,22 @@ void BinaryLink::SendInfo(const xt_can::Info& info)
   (void)SendRaw(tel_id(), &out, sizeof(out));
 }
 
-void BinaryLink::SendSnapMeta(const xt_can::SnapMeta& meta)
+bool BinaryLink::SendSnapMeta(const xt_can::SnapMeta& meta)
 {
   xt_can::SnapMeta out = meta;
   out.hdr.magic = xt_can::kMagic;
   out.hdr.ver = xt_can::kVersion;
   out.hdr.type = xt_can::kTypeSnapMeta;
-  (void)SendRaw(tel_id(), &out, sizeof(out));
+  return SendRaw(tel_id(), &out, sizeof(out));
 }
 
-void BinaryLink::SendSnapData(const xt_can::SnapData& data)
+bool BinaryLink::SendSnapData(const xt_can::SnapData& data)
 {
   xt_can::SnapData out = data;
   out.hdr.magic = xt_can::kMagic;
   out.hdr.ver = xt_can::kVersion;
   out.hdr.type = xt_can::kTypeSnapData;
-  (void)SendRaw(tel_id(), &out, sizeof(out));
+  return SendRaw(tel_id(), &out, sizeof(out));
 }
 
 bool BinaryLink::HandleFrame(const FDCAN_RxHeaderTypeDef& header,

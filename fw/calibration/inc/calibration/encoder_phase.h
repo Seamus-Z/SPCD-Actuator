@@ -243,10 +243,14 @@ class EncoderPhaseCal
     }
 
     // Gate: only fit when encoder speed tracks commanded mechanical ω.
+    // Raw encoder velocity is opposite the field when sign_ == -1; compare in
+    // the command frame or almost no samples gate and the midpoint biases one
+    // direction (exactly the "+ works / - dies, then flips after recal" bug).
     const float omega_cmd_mech = omega_cmd_ / options_.pole_pairs;
     const float abs_cmd =
         (omega_cmd_mech >= 0.0f) ? omega_cmd_mech : -omega_cmd_mech;
-    const float abs_err = omega_enc - omega_cmd_mech;
+    const float omega_enc_cmd_frame = sign_ * omega_enc;
+    const float abs_err = omega_enc_cmd_frame - omega_cmd_mech;
     const float abs_err_a = (abs_err >= 0.0f) ? abs_err : -abs_err;
     const float target_error = omega_cmd_ - omega_target_;
     const float target_error_abs =
@@ -407,6 +411,11 @@ class EncoderPhaseCal
     // electrical offset; retaining either lag biases commutation.
     const float offset_elec =
         CircularMidpoint(direction_mean[0], direction_mean[1]);
+    // Half the fwd/rev mean gap is the open-loop torque lag we removed. Large
+    // values are OK; unequal coverage still leaves a static bias in offset_elec.
+    const float direction_lag_elec =
+        0.5f * math::WrapNegPiToPi(direction_mean[0] - direction_mean[1]);
+    (void)direction_lag_elec;
 
     float residual_sum = 0.0f;
     for (size_t bin = 0; bin < math::kCommutationTableSize; ++bin)

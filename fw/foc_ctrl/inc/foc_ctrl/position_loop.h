@@ -138,16 +138,49 @@ class PositionLoop
     if (!IsFinite(position_cmd_turns_) &&
         options_.max_velocity_error_rad_s > 0.0f)
     {
-      const float slip_hz = options_.max_velocity_error_rad_s / math::k2Pi;
-      const float err_hz = measured_hz - control_velocity_hz_;
-      if (err_hz > slip_hz)
+      // Ignore absurd speed samples (SPI/PLL glitches). Chasing them with the
+      // slip clamp is what produced sudden surge/reverse while "at speed".
+      const float max_cmd_hz = options_.max_velocity_cmd_rad_s / math::k2Pi;
+      const bool measured_plausible =
+          max_cmd_hz <= 0.0f ||
+          (measured_hz <= max_cmd_hz * 1.25f &&
+           measured_hz >= -max_cmd_hz * 1.25f);
+      if (measured_plausible)
       {
-        control_velocity_hz_ = measured_hz - slip_hz;
+        const float slip_hz = options_.max_velocity_error_rad_s / math::k2Pi;
+        const float err_hz = measured_hz - control_velocity_hz_;
+        if (err_hz > slip_hz)
+        {
+          control_velocity_hz_ = measured_hz - slip_hz;
+        }
+        else if (err_hz < -slip_hz)
+        {
+          control_velocity_hz_ = measured_hz + slip_hz;
+        }
       }
-      else if (err_hz < -slip_hz)
+    }
+    // Never let slip chase an overspeed past the host command. Pulling
+    // control_velocity up to measured (then feeding BEMF from it) was the
+    // 60→~180 rad/s lock path after commutation lag collapsed torque.
+    if (!IsFinite(position_cmd_turns_))
+    {
+      if (velocity_cmd_hz_ >= 0.0f)
       {
-        control_velocity_hz_ = measured_hz + slip_hz;
+        if (control_velocity_hz_ > velocity_cmd_hz_)
+        {
+          control_velocity_hz_ = velocity_cmd_hz_;
+        }
       }
+      else if (control_velocity_hz_ < velocity_cmd_hz_)
+      {
+        control_velocity_hz_ = velocity_cmd_hz_;
+      }
+    }
+    // Absolute board ceiling (invalid/host-limit guard).
+    if (options_.max_velocity_cmd_rad_s > 0.0f)
+    {
+      const float max_hz = options_.max_velocity_cmd_rad_s / math::k2Pi;
+      control_velocity_hz_ = Limit(control_velocity_hz_, -max_hz, max_hz);
     }
 
     if (IsFinite(position_cmd_turns_))

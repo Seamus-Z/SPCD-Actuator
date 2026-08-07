@@ -89,7 +89,9 @@ class Application
   void ApplyCoggingResult();
   void PersistCoggingResult();
   float CoggingComp() const;
+  // moteus-style: Finish previous SPI, run PLL, then Start next SPI.
   void UpdateEncoderPll(float dt_s);
+  float CompensatedMechRad() const;
 
   State state_ = State::INIT;
   ::pool::Pool* pool_ = nullptr;
@@ -129,6 +131,8 @@ class Application
   hal::MillisecondTimer::TimerType last_rx_us_ = 0;
   // Last ControlIsrStep timestamp; 0 = use PWM nominal dt next time.
   hal::MillisecondTimer::TimerType last_control_us_ = 0;
+  // True when ma600_->StartSample() is in flight (moteus aux SPI pipeline).
+  bool enc_spi_pending_ = false;
   uint8_t enc_telem_div_ = 0;
   SnapshotCapture snapshot_{};
   uint8_t snap_seq_ = 0;

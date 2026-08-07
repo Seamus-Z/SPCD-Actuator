@@ -123,8 +123,7 @@ bool Application::Init()
       encoder_cal_persisted_ = true;
     }
     SampleEncoder();
-    encoder_pll_.Reset(enc_theta_mech_rad_,
-                       ma600_->commutation_offset_rad());
+    encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
     enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
   }
 
@@ -248,6 +247,12 @@ void Application::StopOutput()
   {
     phase_pwm_->DisableControlIsr();
   }
+  // Abort in-flight snapshot so a later Capture is not stuck busy forever.
+  if (snapshot_.busy())
+  {
+    snapshot_.Finish();
+    snap_meta_sent_ = false;
+  }
   last_control_us_ = 0;
   if (encoder_cal_.active())
   {
@@ -301,6 +306,7 @@ void Application::StartControlIsr()
     return;
   }
   last_control_us_ = 0;
+  enc_spi_pending_ = false;
   phase_pwm_->EnableControlIsr(&Application::ControlIsrThunk, this);
 }
 
@@ -344,12 +350,14 @@ void Application::ControlIsrStep()
   const bool dq_on = current_loop_.get() != nullptr && current_loop_->active() &&
                      !vel_on && !cal_on && !bemf_on &&
                      mode_ == telemetry::xt_can::kModeDq;
-  if ((!vfoc_on && !dq_on && !vel_on && !cal_on && !bemf_on && !r_on &&
-       !l_on && !cogging_on) ||
-      phase_pwm_.get() == nullptr || current_adc_.get() == nullptr)
+  if (phase_pwm_.get() == nullptr || current_adc_.get() == nullptr)
   {
     return;
   }
+
+  const bool control_active =
+      vfoc_on || dq_on || vel_on || cal_on || bemf_on || r_on || l_on ||
+      cogging_on;
 
   // Prefer measured ISR period. Nominal period_s() can disagree with real UEV
   // spacing; that scales PLL ω and makes vel PID think it is already tracking.
@@ -361,7 +369,7 @@ void Application::ControlIsrStep()
     {
       const uint32_t dt_us = static_cast<uint32_t>(
           hal::MillisecondTimer::subtract_us(now, last_control_us_));
-      // 15 kHz → ~67 us; clamp coalesced/stalled IRQs so ω stays sane.
+      // 15 kHz -> ~67 us; clamp coalesced/stalled IRQs so ω stays sane.
       if (dt_us >= 20u && dt_us <= 500u)
       {
         dt_s = static_cast<float>(dt_us) * 1.0e-6f;
@@ -369,6 +377,32 @@ void Application::ControlIsrStep()
     }
     last_control_us_ = now;
   }
+
+  // Calibration/mode end paths historically left TIM5 ISR enabled with every
+  // loop inactive. Keep snapshot capture alive in that window; otherwise stop
+  // the zombie ISR so Snap no longer arms into a permanent Capturing hang.
+  if (!control_active)
+  {
+    if (snapshot_.state() == SnapshotCapture::State::Capturing)
+    {
+      const auto sample = current_adc_->ReadLatest();
+      last_current_ = sample;
+      if (encoder_ok_)
+      {
+        UpdateEncoderPll(dt_s);
+      }
+      const uint32_t dt_us = static_cast<uint32_t>(dt_s * 1.0e6f + 0.5f);
+      snapshot_.PushIsr(id_A_, iq_A_, sample.i1_A, sample.i2_A, sample.i3_A,
+                        enc_theta_mech_rad_, enc_theta_elec_rad_, dt_us);
+    }
+    else if (phase_pwm_->control_isr_on())
+    {
+      phase_pwm_->DisableControlIsr();
+      last_control_us_ = 0;
+    }
+    return;
+  }
+
   const auto sample = current_adc_->ReadLatest();
   last_current_ = sample;
 
@@ -448,8 +482,11 @@ void Application::ControlIsrStep()
       return;
     }
     current_loop_->SetRefs(position_loop_->id_ref_A(), iq);
-    const float w_cmd = position_loop_->control_velocity();
-    current_loop_->SetOmega(w_cmd * board::MotorParams().pole_pairs, w_cmd);
+    // Use measured speed for BEMF/phase-lead (same as dq). Command-speed FF
+    // over-leads the lagging direction and turns a small encoder-cal bias into
+    // a hard one-sided speed ceiling that flips after recalibration.
+    const float w_meas = encoder_pll_.velocity_mech();
+    current_loop_->SetOmega(encoder_pll_.omega_elec(), w_meas);
     const float theta_elec = encoder_pll_.electrical_theta();
     foc_ctrl::CurrentLoop::Duties duties;
     if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
@@ -464,7 +501,6 @@ void Application::ControlIsrStep()
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
 
-    const float w_meas = encoder_pll_.velocity_mech();
     const bool finished = bemf_cal_.Step(dt_s, w_meas, current_loop_->vq_V(),
                                          current_loop_->iq_A());
     if (finished)
@@ -575,8 +611,8 @@ void Application::ControlIsrStep()
       return;
     }
     current_loop_->SetRefs(position_loop_->id_ref_A(), iq);
-    const float w_cmd = position_loop_->control_velocity();
-    current_loop_->SetOmega(w_cmd * board::MotorParams().pole_pairs, w_cmd);
+    current_loop_->SetOmega(encoder_pll_.omega_elec(),
+                            encoder_pll_.velocity_mech());
     const float theta_elec = encoder_pll_.electrical_theta();
     foc_ctrl::CurrentLoop::Duties duties;
     if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
@@ -632,8 +668,10 @@ void Application::ControlIsrStep()
       return;
     }
     current_loop_->SetRefs(position_loop_->id_ref_A(), iq + CoggingComp());
-    const float w_cmd = position_loop_->control_velocity();
-    current_loop_->SetOmega(w_cmd * board::MotorParams().pole_pairs, w_cmd);
+    // Measured ω for FF/lead. Using control_velocity here made a static
+    // encoder-cal phase bias choose which direction could reach high speed.
+    current_loop_->SetOmega(encoder_pll_.omega_elec(),
+                            encoder_pll_.velocity_mech());
     const float theta_elec = encoder_pll_.electrical_theta();
     foc_ctrl::CurrentLoop::Duties duties;
     if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
@@ -825,6 +863,12 @@ void Application::MaybeCommandTimeout()
     return;
   }
   if (mode_ == telemetry::xt_can::kModeStop)
+  {
+    return;
+  }
+  // Host pauses Live streaming while a snapshot dump is in flight; do not
+  // treat that quiet period as link loss or we abort the dump mid-send.
+  if (snapshot_.busy())
   {
     return;
   }
@@ -1030,12 +1074,24 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
 }
 
 
+float Application::CompensatedMechRad() const
+{
+  // moteus order: apply electrical commutation table in mechanical domain
+  // before the PLL (equivalent to folding motor.offset into compensated_value).
+  const float pp = board::MotorParams().pole_pairs;
+  const float corr_m =
+      (pp > 1.0e-6f) ? (ma600_->commutation_offset_rad() / pp) : 0.0f;
+  return math::WrapZeroToTwoPi(enc_theta_mech_rad_ + corr_m);
+}
+
 void Application::SampleEncoder()
 {
   if (ma600_.get() == nullptr)
   {
     return;
   }
+  // Non-ISR path: blocking sample is fine.
+  enc_spi_pending_ = false;
   (void)ma600_->Sample();
   enc_counts_rad_ = ma600_->angle_counts_rad();
   enc_theta_mech_rad_ = ma600_->angle_mech_rad();
@@ -1045,9 +1101,9 @@ void Application::SampleEncoder()
   }
   else
   {
+    // Same formula as PLL output: compensated_mech * pp.
     enc_theta_elec_rad_ = math::WrapZeroToTwoPi(
-        ma600_->angle_elec_rad(board::MotorParams().pole_pairs) +
-        ma600_->commutation_offset_rad());
+        CompensatedMechRad() * board::MotorParams().pole_pairs);
   }
 }
 
@@ -1057,12 +1113,26 @@ void Application::UpdateEncoderPll(float dt_s)
   {
     return;
   }
-  (void)ma600_->Sample();
+  // moteus aux_port: StartSample early / FinishSample later. Across control
+  // cycles we Finish the previous Start, then Start the next transfer so SPI
+  // overlaps the rest of the ISR (and the following ADC conversion window).
+  if (enc_spi_pending_)
+  {
+    (void)ma600_->FinishSample();
+    enc_spi_pending_ = false;
+  }
+  else
+  {
+    (void)ma600_->Sample();
+  }
   enc_counts_rad_ = ma600_->angle_counts_rad();
   enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  encoder_pll_.Update(enc_theta_mech_rad_, dt_s,
-                      ma600_->commutation_offset_rad());
+  const float compensated = CompensatedMechRad();
+  // Commutation already folded into compensated mech; no post-PLL addend.
+  encoder_pll_.Update(compensated, dt_s, 0.0f);
   enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
+  ma600_->StartSample();
+  enc_spi_pending_ = true;
 }
 void Application::RestoreEncoderCalBackup()
 {
@@ -1076,7 +1146,7 @@ void Application::RestoreEncoderCalBackup()
                                 encoder_cal_backup_.commutation_valid);
   enc_counts_rad_ = ma600_->angle_counts_rad();
   enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  encoder_pll_.Reset(enc_theta_mech_rad_, ma600_->commutation_offset_rad());
+  encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
   enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
   encoder_cal_backup_valid_ = false;
 }
@@ -1096,8 +1166,7 @@ void Application::ApplyEncoderCalResult()
                                 r.commutation_valid);
   enc_counts_rad_ = ma600_->angle_counts_rad();
   enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  encoder_pll_.Reset(enc_theta_mech_rad_,
-                     ma600_->commutation_offset_rad());
+  encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
   enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
   encoder_cal_backup_valid_ = false;
   // Defer flash write to main loop (ISR must not program flash).
@@ -1345,7 +1414,10 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   r.mode = mode_;
   r.enc_ok = encoder_ok_ ? 1 : 0;
   r.enc_sign = 1;
-  r.reserved = 0;
+  {
+    const uint32_t spikes = encoder_pll_.spike_count();
+    r.enc_spike = (spikes > 255u) ? 255u : static_cast<uint8_t>(spikes);
+  }
   r.id_mA = AmpsToMilli(id_A_);
   r.iq_mA = AmpsToMilli(iq_A_);
   r.idref_mA = 0;
@@ -1437,7 +1509,12 @@ void Application::MaybeSendSnapshot()
   {
     telemetry::xt_can::SnapMeta meta{};
     snapshot_.FillMeta(&meta, snap_seq_);
-    binary_link_->SendSnapMeta(meta);
+    // Do not enter Sending until Meta is queued; otherwise the host waits
+    // forever while we burn through data frames.
+    if (!binary_link_->SendSnapMeta(meta))
+    {
+      return;
+    }
     snap_meta_sent_ = true;
     snapshot_.BeginSend();
   }
@@ -1447,9 +1524,18 @@ void Application::MaybeSendSnapshot()
     return;
   }
 
-  // Burst a few FD frames per main-loop iteration.
-  for (int i = 0; i < 4; ++i)
+  // Queue as many FD frames as the TX FIFO will take this iteration.
+  // Advance the read cursor ONLY after a successful queue — a full FIFO used
+  // to drop the payload while still moving send_index_, so the host saw
+  // "incomplete got=N/512" while Live replies resumed almost immediately.
+  for (int i = 0; i < 16; ++i)
   {
+    if (snapshot_.SendComplete())
+    {
+      snapshot_.Finish();
+      snap_meta_sent_ = false;
+      break;
+    }
     telemetry::xt_can::SnapData frame{};
     if (!snapshot_.FillDataFrame(&frame, snap_seq_))
     {
@@ -1457,7 +1543,11 @@ void Application::MaybeSendSnapshot()
       snap_meta_sent_ = false;
       break;
     }
-    binary_link_->SendSnapData(frame);
+    if (!binary_link_->SendSnapData(frame))
+    {
+      break;
+    }
+    snapshot_.AdvanceSend(frame.n);
   }
 }
 

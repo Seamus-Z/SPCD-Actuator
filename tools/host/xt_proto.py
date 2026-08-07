@@ -324,6 +324,7 @@ class CtrlReply:
     mode: int
     enc_ok: bool
     enc_sign: int
+    enc_spike: int
     id_a: float
     iq_a: float
     idref_a: float
@@ -576,6 +577,7 @@ def parse_frame(data: bytes) -> Optional[object]:
             mode=fields[7],
             enc_ok=bool(fields[8]),
             enc_sign=fields[9],
+            enc_spike=int(fields[10]),
             id_a=fields[11] / 1000.0,
             iq_a=fields[12] / 1000.0,
             idref_a=fields[13] / 1000.0,

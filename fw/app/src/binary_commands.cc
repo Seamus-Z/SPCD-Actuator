@@ -163,7 +163,7 @@ uint8_t BinaryCommands::HandleDq(const uint8_t* payload, size_t payload_len)
   if (use_enc)
   {
     app_->SampleEncoder();
-    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->encoder_pll_.Reset(app_->CompensatedMechRad(), 0.0f);
     app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
     theta_elec = app_->enc_theta_elec_rad_;
     theta_override = &theta_elec;
@@ -226,9 +226,8 @@ uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
     app_->position_loop_->SetVelocity(omega_ref);
     app_->position_loop_->SetIdRef(id_ref);
     app_->current_loop_->SetRefs(id_ref, app_->current_loop_->iq_ref_A());
-    const float omega_control = app_->position_loop_->control_velocity();
-    app_->current_loop_->SetOmega(
-        omega_control * board::MotorParams().pole_pairs, omega_control);
+    app_->current_loop_->SetOmega(app_->encoder_pll_.omega_elec(),
+                                  app_->encoder_pll_.velocity_mech());
     return telemetry::xt_can::kStatusOk;
   }
 
@@ -237,7 +236,7 @@ uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
 
   // moteus velocity mode: position=NaN + velocity command.
   app_->SampleEncoder();
-  app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+  app_->encoder_pll_.Reset(app_->CompensatedMechRad(), 0.0f);
   app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
   app_->position_loop_->Start(foc_ctrl::QuietNan(), omega_ref, id_ref);
 
@@ -248,9 +247,8 @@ uint8_t BinaryCommands::HandleVel(const uint8_t* payload, size_t payload_len)
   cmd.iq_A = 0.0f;
   cmd.theta_rate_rad_s = 0.0f;
   app_->current_loop_->Start(cmd);
-  const float omega_control = app_->position_loop_->control_velocity();
-  app_->current_loop_->SetOmega(
-      omega_control * board::MotorParams().pole_pairs, omega_control);
+  app_->current_loop_->SetOmega(app_->encoder_pll_.omega_elec(),
+                                app_->encoder_pll_.velocity_mech());
 
   app_->last_current_ = app_->current_adc_->ReadLatest();
   foc_ctrl::CurrentLoop::Duties duties;
@@ -504,7 +502,7 @@ uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
 
     // moteus velocity mode cold start (mirrors HandleVel), Id forced to 0.
     app_->SampleEncoder();
-    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->encoder_pll_.Reset(app_->CompensatedMechRad(), 0.0f);
     app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
     app_->position_loop_->Start(foc_ctrl::QuietNan(),
                                 app_->bemf_cal_.velocity_cmd_mech_rad_s(),
@@ -569,7 +567,7 @@ uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
 
     // moteus velocity mode cold start (mirrors HandleVel), Id forced to 0.
     app_->SampleEncoder();
-    app_->encoder_pll_.Reset(app_->enc_theta_mech_rad_);
+    app_->encoder_pll_.Reset(app_->CompensatedMechRad(), 0.0f);
     app_->enc_theta_elec_rad_ = app_->encoder_pll_.electrical_theta();
     app_->position_loop_->Start(foc_ctrl::QuietNan(),
                                 app_->cogging_cal_.velocity_cmd_mech_rad_s(),
@@ -637,7 +635,8 @@ uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)
     opts.omega_elec_rad_s = -opts.omega_elec_rad_s;
   }
   opts.pole_pairs = board::MotorParams().pole_pairs;
-  opts.mech_revs_each_way = 2.0f;
+  // More revs → denser commutation table; reduces one-sided high-speed bias.
+  opts.mech_revs_each_way = 3.0f;
   if (is_lock)
   {
     opts.current_A = (opts.current_A > 0.05f) ? opts.current_A : 1.0f;

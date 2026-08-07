@@ -19,6 +19,8 @@ const CHANNELS = [
   { key: "omega_cmd_rad_s", label: "omegaCmd", path: "motion/omega_cmd", color: "#d0a088", unit: "rad/s", on: true, group: "motion" },
   { key: "omega_elec_rad_s", label: "omegaElec", path: "motion/omega_elec", color: "#7098c0", unit: "rad/s", on: false, group: "motion" },
   { key: "enc_raw", label: "encRaw", path: "encoder/raw", color: "#c0d088", unit: "", on: true, group: "encoder" },
+  { key: "enc_spike", label: "encSpike", path: "encoder/spike", color: "#ff7a7a", unit: "", on: true, group: "encoder" },
+
   { key: "enc_theta_mech_rad", label: "encMech", path: "encoder/theta_mech", color: "#a8c070", unit: "rad", on: true, group: "encoder" },
   { key: "enc_theta_elec_rad", label: "encElec", path: "encoder/theta_elec", color: "#88b060", unit: "rad", on: true, group: "encoder" },
   { key: "duty_a", label: "dutyA", path: "pwm/dutyA", color: "#b8c0d0", unit: "", on: false, group: "pwm" },
@@ -1382,6 +1384,7 @@ document.getElementById("btnSnapAnalyze").onclick = async () => {
     snapAnalysisEl.textContent = `error: ${e}`;
   }
 };
+
 
 renderSnapTree();
 setMode("live");

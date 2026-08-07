@@ -165,6 +165,7 @@ class MsgLog:
                 f"Id={r.id_a:+.3f}/{r.idref_a:+.3f} "
                 f"Iq={r.iq_a:+.3f}/{r.iqref_a:+.3f} "
                 f"ω={r.omega_mech_rad_s:+.2f} enc={r.enc_raw} "
+                f"spike={r.enc_spike} "
                 f"cisr={int(r.cisr)} pwm={int(r.pwm_on)}"
             ),
         )
@@ -552,6 +553,7 @@ class CanBridge:
                         omega_elec=msg.omega_elec_rad_s,
                         voltage_headroom=msg.voltage_headroom_v,
                     )
+                    sample["enc_spike"] = int(msg.enc_spike)
                     self._push_live_sample(sample)
                 self.msglog.maybe_ctrl(msg)
                 try:
@@ -692,7 +694,7 @@ class CanBridge:
                 bus = self.bus
                 op = self._stream_op
                 args = dict(self._stream_args)
-            if bus is not None:
+            if bus is not None and op:
                 try:
                     seq = self._next_seq()
                     payload = self._pack_stream_frame(op, args, seq)
@@ -812,99 +814,117 @@ class CanBridge:
         self,
         n_samples: int = SNAP_MAX_SAMPLES,
         decimate: int = 1,
-        timeout: float = 8.0,
+        timeout: float = 12.0,
     ) -> dict:
         if self.bus is None:
             return {"ok": False, "error": "CAN not connected"}
-        self._drain_queues()
+        # Pause Live stream so 50 Hz vel/query TX does not crowd SnapData off
+        # the bus / gs_usb RX path while the dump is in flight.
+        with self._lock:
+            saved_op = self._stream_op
+            saved_args = dict(self._stream_args)
+            self._stream_op = ""
         try:
-            self._send_raw(
-                pack_snap(n_samples=n_samples, decimate=decimate, seq=self._next_seq())
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
-
-        deadline = time.monotonic() + timeout
-        ack: Ack | None = None
-        while time.monotonic() < deadline and ack is None:
+            self._drain_queues()
             try:
-                ack = self._acks.get(timeout=0.05)
-            except Empty:
-                pass
-        if ack is None:
-            err = "snapshot ACK timeout"
-            self.msglog.push("ERR", err)
-            return {"ok": False, "error": err}
-        if ack.cmd != CMD_SNAP or ack.status != STATUS_OK:
-            err = (
-                "snapshot rejected: "
-                f"status={ack.status}"
-                + (" (start dq/vfoc first)" if ack.status == STATUS_NOT_RUN else "")
-            )
-            self.msglog.push("ERR", err)
-            return {"ok": False, "error": err, "status": ack.status}
+                self._send_raw(
+                    pack_snap(
+                        n_samples=n_samples, decimate=decimate, seq=self._next_seq()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc)}
 
-        meta: SnapMeta | None = None
-        # Capture itself may take n/hz seconds; keep remaining timeout for dump.
-        while time.monotonic() < deadline and meta is None:
-            try:
-                meta = self._snap_metas.get(timeout=0.05)
-            except Empty:
-                pass
-        if meta is None:
-            err = "snapshot meta timeout (is control ISR running?)"
-            self.msglog.push("ERR", err)
-            return {"ok": False, "error": err}
+            deadline = time.monotonic() + timeout
+            ack: Ack | None = None
+            while time.monotonic() < deadline and ack is None:
+                try:
+                    ack = self._acks.get(timeout=0.05)
+                except Empty:
+                    pass
+            if ack is None:
+                err = "snapshot ACK timeout"
+                self.msglog.push("ERR", err)
+                return {"ok": False, "error": err}
+            if ack.cmd != CMD_SNAP or ack.status != STATUS_OK:
+                err = (
+                    "snapshot rejected: "
+                    f"status={ack.status}"
+                    + (" (start dq/vfoc first)" if ack.status == STATUS_NOT_RUN else "")
+                )
+                self.msglog.push("ERR", err)
+                return {"ok": False, "error": err, "status": ack.status}
 
-        ch = meta.channels or SNAP_CHANNELS
-        n = meta.n_samples
-        rows = [[0.0] * ch for _ in range(n)]
-        got = 0
-        while time.monotonic() < deadline and got < n:
-            try:
-                frame = self._snap_datas.get(timeout=0.05)
-            except Empty:
-                continue
-            for i in range(frame.n):
-                idx = frame.start_index + i
-                if idx >= n:
+            meta: SnapMeta | None = None
+            # Capture itself may take n/hz seconds; keep remaining timeout for dump.
+            while time.monotonic() < deadline and meta is None:
+                try:
+                    meta = self._snap_metas.get(timeout=0.05)
+                except Empty:
+                    pass
+            if meta is None:
+                err = "snapshot meta timeout (is control ISR running?)"
+                self.msglog.push("ERR", err)
+                return {"ok": False, "error": err}
+
+            # Give the dump its own budget after Meta (128 FD frames for 512 pts).
+            dump_deadline = time.monotonic() + max(3.0, timeout * 0.75)
+            if dump_deadline > deadline:
+                deadline = dump_deadline
+
+            ch = meta.channels or SNAP_CHANNELS
+            n = meta.n_samples
+            rows = [[0.0] * ch for _ in range(n)]
+            got = 0
+            while time.monotonic() < deadline and got < n:
+                try:
+                    frame = self._snap_datas.get(timeout=0.05)
+                except Empty:
                     continue
-                base = i * ch
-                for c in range(ch):
-                    rows[idx][c] = frame.samples_mA[base + c] / 1000.0
-                got += 1
+                for i in range(frame.n):
+                    idx = frame.start_index + i
+                    if idx >= n:
+                        continue
+                    base = i * ch
+                    for c in range(ch):
+                        rows[idx][c] = frame.samples_mA[base + c] / 1000.0
+                    got += 1
 
-        if got < n:
-            err = f"snapshot incomplete got={got}/{n}"
-            self.msglog.push("ERR", err)
-            return {"ok": False, "error": err, "meta": {
+            if got < n:
+                err = f"snapshot incomplete got={got}/{n}"
+                self.msglog.push("ERR", err)
+                return {"ok": False, "error": err, "meta": {
+                    "n_samples": n,
+                    "sample_hz": meta.sample_hz,
+                    "decimate": meta.decimate,
+                    "duration_us": meta.duration_us,
+                }}
+
+            series = {k: [] for k in SNAP_CHANNEL_KEYS[:ch]}
+            keys = SNAP_CHANNEL_KEYS[:ch]
+            for row in rows:
+                for c, k in enumerate(keys):
+                    series[k].append(row[c])
+
+            result = {
+                "ok": True,
                 "n_samples": n,
                 "sample_hz": meta.sample_hz,
                 "decimate": meta.decimate,
                 "duration_us": meta.duration_us,
-            }}
-
-        series = {k: [] for k in SNAP_CHANNEL_KEYS[:ch]}
-        keys = SNAP_CHANNEL_KEYS[:ch]
-        for row in rows:
-            for c, k in enumerate(keys):
-                series[k].append(row[c])
-
-        result = {
-            "ok": True,
-            "n_samples": n,
-            "sample_hz": meta.sample_hz,
-            "decimate": meta.decimate,
-            "duration_us": meta.duration_us,
-            "channels": keys,
-            "series": series,
-        }
-        self.last_snap = result
-        self.msglog.push(
-            "SYS",
-            f"snapshot ok n={n} hz={meta.sample_hz} dur={meta.duration_us}us",
-        )
-        return result
+                "channels": keys,
+                "series": series,
+            }
+            self.last_snap = result
+            self.msglog.push(
+                "SYS",
+                f"snapshot ok n={n} hz={meta.sample_hz} dur={meta.duration_us}us",
+            )
+            return result
+        finally:
+            with self._lock:
+                self._stream_op = saved_op
+                self._stream_args = saved_args
 
 
     def _accum_enc_ratio(self, enc: EncTelem | None):
@@ -936,6 +956,7 @@ class CanBridge:
             "enc_sign": enc.sign if enc else 1,
             "enc_ok": bool(enc.ok) if enc else bool(getattr(t, "enc_ok", False)),
             "enc_mode": bool(getattr(t, "enc_mode", False)),
+            "enc_spike": int(getattr(enc, "enc_spike", 0) or 0),
         }
         cal_fields = {
             "cal_kind": cal.kind if cal else 0,
