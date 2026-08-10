@@ -1,5 +1,5 @@
 /* Scope UI: telemetry tree + signal quality (PlotJuggler / Foxglove style). */
-const modeNames = ["stop", "raw", "vfoc", "dq", "vel", "cal"];
+const modeNames = ["stop", "servo", "cal"];
 const MAX_POINTS = 2000;
 
 const CHANNELS = [
@@ -717,20 +717,12 @@ async function postCmd(body) {
 }
 
 document.getElementById("btnStop").onclick = () => postCmd({ op: "stop" });
-document.getElementById("btnDq").onclick = () =>
-  postCmd({
-    op: "dq",
-    id: Number(document.getElementById("idA").value),
-    iq: Number(document.getElementById("iqA").value),
-    omega: Number(document.getElementById("omega").value),
-  });
-
 document.getElementById("btnVel").onclick = () => {
   const input = document.getElementById("omegaMech");
   const omega = Math.max(-200, Math.min(200, Number(input.value)));
   input.value = String(omega);
   postCmd({
-    op: "vel",
+    op: "servo",
     omega_mech: omega,
     id: Number(document.getElementById("idA").value),
   });

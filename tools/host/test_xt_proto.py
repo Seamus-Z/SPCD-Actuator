@@ -2,6 +2,7 @@ import struct
 import unittest
 
 import xt_proto
+from gui.web_server import CanBridge
 
 
 
@@ -75,6 +76,19 @@ class CalibrationProtocolTest(unittest.TestCase):
 class ServoCommandProtocolTest(unittest.TestCase):
     def test_pack_servo_uses_velocity_and_d_axis_current(self):
         frame = xt_proto.pack_servo(12.345, -0.678, seq=7)
+        self.assertEqual(
+            struct.unpack("<BBBBBii", frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 7,
+             xt_proto.CMD_SERVO, 12_345, -678),
+        )
+
+
+class GuiControlStreamTest(unittest.TestCase):
+    def test_servo_stream_packs_a_servo_command(self):
+        bridge = object.__new__(CanBridge)
+        frame = bridge._pack_stream_frame(
+            "servo", {"omega_mech": 12.345, "id": -0.678}, seq=7
+        )
         self.assertEqual(
             struct.unpack("<BBBBBii", frame),
             (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 7,

@@ -40,23 +40,11 @@
       <h2 style="margin-top:1.2rem">Command</h2>
       <label>Id (A)</label>
       <input id="idA" type="number" step="0.1" value="0" />
-      <label>Iq (A)</label>
-      <input id="iqA" type="number" step="0.1" value="0.5" />
-      <label>ω elec (rad/s) — open-loop dq only</label>
-      <input id="omega" type="number" step="1" value="50" />
-      <div class="row">
-        <button id="btnDq" type="button">Start dq</button>
-      </div>
-      <label style="margin-top:1rem">ω_mech (rad/s) — PID vel，限幅 ±200</label>
+      <label>ω mech (rad/s) — closed-loop servo，限幅 ±200</label>
       <input id="omegaMech" type="number" step="1" min="-200" max="200" value="20" />
       <div class="row">
-        <button id="btnVel" type="button">Start vel (PID)</button>
+        <button id="btnVel" type="button">Start servo</button>
         <button class="stop" id="btnStop" type="button">Stop</button>
-      </div>
-      <label style="margin-top:1rem">Vfoc V</label>
-      <input id="vfocV" type="number" step="0.1" value="0.8" />
-      <div class="row">
-        <button class="ghost" id="btnVfoc" type="button">Start vfoc</button>
       </div>
       <div class="status" id="status">idle</div>
     </section>

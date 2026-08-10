@@ -69,14 +69,12 @@ _ARPHRD_CAN = "280"
 
 _CMD_NAMES = {
     0: "stop",
-    1: "dq",
-    2: "vfoc",
-    3: "raw",
     4: "info",
     5: "snap",
-    6: "vel",
+    6: "servo",
     7: "cal",
     8: "query",
+    9: "enc_comp",
 }
 
 
@@ -95,11 +93,8 @@ _CAL_STATE_NAMES = {
 }
 _MODE_NAMES = {
     0: "stop",
-    1: "raw",
-    2: "vfoc",
-    3: "dq",
-    4: "vel",
-    5: "cal",
+    1: "servo",
+    2: "cal",
 }
 
 
@@ -1418,40 +1413,13 @@ def make_handler(bridge: CanBridge):
                     bridge.set_stream("stop")
                     self._json(200, {"ok": True, "status": 0, "stream": "stop"})
                     return
-                if op == "dq":
-                    bridge.set_stream(
-                        "dq",
-                        id=float(req.get("id", 0)),
-                        iq=float(req.get("iq", 0)),
-                        omega=float(req.get("omega", 0)),
-                    )
-                    self._json(200, {"ok": True, "status": 0, "stream": "dq"})
-                    return
-                if op == "vfoc":
-                    bridge.set_stream(
-                        "vfoc",
-                        theta=float(req.get("theta", 0)),
-                        v=float(req.get("v", 0)),
-                        omega=float(req.get("omega", 0)),
-                    )
-                    self._json(200, {"ok": True, "status": 0, "stream": "vfoc"})
-                    return
                 if op == "servo":
                     bridge.set_stream(
-                        "vel",
+                        "servo",
                         omega_mech=float(req.get("omega_mech", 0)),
                         id=float(req.get("id", 0)),
                     )
-                    self._json(200, {"ok": True, "status": 0, "stream": "vel"})
-                    return
-                if op == "raw":
-                    bridge.set_stream(
-                        "raw",
-                        a=int(req.get("a", 0)),
-                        b=int(req.get("b", 0)),
-                        c=int(req.get("c", 0)),
-                    )
-                    self._json(200, {"ok": True, "status": 0, "stream": "raw"})
+                    self._json(200, {"ok": True, "status": 0, "stream": "servo"})
                     return
                 if op == "cal_enc":
                     bridge.set_stream("query")
