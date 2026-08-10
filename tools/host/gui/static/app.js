@@ -742,14 +742,20 @@ const calParamsBemfEl = document.getElementById("calParamsBemf");
 const calParamsREl = document.getElementById("calParamsR");
 const calParamsLEl = document.getElementById("calParamsL");
 const calParamsCoggingEl = document.getElementById("calParamsCogging");
+const calParamsEncCompEl = document.getElementById("calParamsEncComp");
+const btnEncCompFromSnap = document.getElementById("btnEncCompFromSnap");
+const btnEncCompClear = document.getElementById("btnEncCompClear");
 function updateCalParamsVisibility() {
   const m = calMethodEl.value;
   calParamsEncEl.hidden =
-      m === "bemf" || m === "r" || m === "l" || m === "cogging";
+      m === "bemf" || m === "r" || m === "l" || m === "cogging" || m === "enc_comp";
   calParamsBemfEl.hidden = m !== "bemf";
   calParamsREl.hidden = m !== "r";
   calParamsLEl.hidden = m !== "l";
   if (calParamsCoggingEl) calParamsCoggingEl.hidden = m !== "cogging";
+  if (calParamsEncCompEl) calParamsEncCompEl.hidden = m !== "enc_comp";
+  if (btnEncCompFromSnap) btnEncCompFromSnap.hidden = m !== "enc_comp";
+  if (btnEncCompClear) btnEncCompClear.hidden = m !== "enc_comp";
 }
 calMethodEl.addEventListener("change", updateCalParamsVisibility);
 updateCalParamsVisibility();
@@ -791,8 +797,103 @@ document.getElementById("btnCalStart").onclick = () => {
       velocity: Number(document.getElementById("calCoggingVelocity").value),
       record_revs: Number(document.getElementById("calCoggingRevs").value),
     });
+  } else if (m === "enc_comp") {
+    runEncComp({ action: "run" });
   }
 };
+
+async function runEncComp(opts) {
+  const status = document.getElementById("calStatus");
+  const verdict = document.getElementById("calVerdict");
+  const box = document.getElementById("calResult");
+  const bar = document.getElementById("calProgressBar");
+  const action = opts.action || "run";
+  if (status) {
+    status.textContent =
+      action === "clear"
+        ? "清除几何补偿…"
+        : action === "from_snap"
+          ? "从上次 Snap 生成并写入…"
+          : "恒速采集中（请勿操作 CAN）…";
+  }
+  if (verdict) {
+    verdict.textContent = "运行中…";
+    verdict.className = "status";
+  }
+  if (bar) bar.style.width = action === "clear" ? "30%" : "15%";
+  try {
+    const body =
+      action === "clear"
+        ? { action: "clear" }
+        : action === "from_snap"
+          ? { action: "from_snap" }
+          : {
+              action: "run",
+              omega_mech: Number(document.getElementById("calEncCompOmega").value),
+              seconds: Number(document.getElementById("calEncCompSeconds").value),
+              rate: Number(document.getElementById("calEncCompRate").value),
+            };
+    const j = await postJson("/api/enc_comp", body);
+    if (bar) bar.style.width = "100%";
+    if (!j.ok) {
+      if (status) status.textContent = `失败: ${j.error || JSON.stringify(j)}`;
+      if (verdict) {
+        verdict.textContent = "不合格 — 几何补偿未写入";
+        verdict.className = "status fail";
+      }
+      if (box) box.textContent = JSON.stringify(j, null, 2);
+      return;
+    }
+    if (action === "clear") {
+      if (status) status.textContent = "几何补偿已清除";
+      if (verdict) {
+        verdict.textContent = "已清除 — 表已禁用并写 Flash";
+        verdict.className = "status";
+      }
+      if (box) box.textContent = "encoder geometric compensation cleared";
+      return;
+    }
+    const pct = 100 * Number(j.vel_dev_std || 0);
+    if (status) {
+      status.textContent = `完成 · source=${j.source} · samples=${j.n_samples}`;
+    }
+    if (verdict) {
+      const grade = pct < 2 ? "good" : pct < 5 ? "warn" : "bad";
+      verdict.textContent =
+        grade === "good"
+          ? "良好 — 2/rev 偏差不大，表已写入"
+          : grade === "warn"
+            ? "已写入 — 仍建议复查磁环同心/平行"
+            : "已写入 — 偏差偏大，优先检查磁环安装后再重做";
+      verdict.className = "status";
+    }
+    if (box) {
+      box.textContent = [
+        `source=${j.source}`,
+        `mean_ω=${Number(j.mean_omega).toFixed(3)} rad/s`,
+        `采集前速度偏差 std=${pct.toFixed(2)}%`,
+        `peak|Δθ|=${Number(j.peak_rad).toFixed(4)} rad (${Number(j.peak_deg).toFixed(2)}°)`,
+        `bins=${j.filled_bins}/256  samples=${j.n_samples}`,
+        "",
+        "已写入固件 NVS。请重新 vel=200 Capture，看 ω harmonics 的 2 是否下降。",
+      ].join("\n");
+    }
+  } catch (e) {
+    if (status) status.textContent = `error: ${e}`;
+    if (verdict) {
+      verdict.textContent = "失败";
+      verdict.className = "status fail";
+    }
+  }
+}
+
+if (btnEncCompFromSnap) {
+  btnEncCompFromSnap.onclick = () => runEncComp({ action: "from_snap" });
+}
+if (btnEncCompClear) {
+  btnEncCompClear.onclick = () => runEncComp({ action: "clear" });
+}
+
 document.getElementById("btnCalAbort").onclick = () =>
   postCmd({ op: "cal_abort" });
 
@@ -1338,6 +1439,55 @@ document.getElementById("btnSnap").onclick = async () => {
   }
 };
 
+
+function downloadSnapJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById("btnSnapExport").onclick = async () => {
+  if (!snapData) {
+    snapStatus.textContent = "先 Capture 一次快照再 Export";
+    snapStatus.classList.add("fail");
+    return;
+  }
+  const w = Number(document.getElementById("snapOmega").value) || 0;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const name = w > 0 ? `snap_${w}.json` : `snap_${stamp}.json`;
+  const payload = {
+    ok: true,
+    n_samples: snapData.n_samples,
+    sample_hz: snapData.sample_hz,
+    decimate: snapData.decimate,
+    duration_us: snapData.duration_us,
+    channels: snapData.channels,
+    series: snapData.series,
+    omega_mech_rad_s: w,
+    exported_at: new Date().toISOString(),
+  };
+  downloadSnapJson(payload, name);
+  // Also write under tools/host/ so snap_analysis.py can open it directly.
+  let serverNote = "";
+  try {
+    const j = await postJson("/api/snap/export", { omega_mech: w, filename: name });
+    if (j.ok) serverNote = ` · saved ${j.path}`;
+    else serverNote = ` · server save failed: ${j.error || "?"}`;
+  } catch (e) {
+    serverNote = ` · server save failed: ${e}`;
+  }
+  snapStatus.classList.remove("fail");
+  snapStatus.textContent = `exported ${name}${serverNote}`;
+};
+
 const snapAnalysisEl = document.getElementById("snapAnalysis");
 document.getElementById("btnSnapAnalyze").onclick = async () => {
   if (!snapData) {
@@ -1377,6 +1527,12 @@ document.getElementById("btnSnapAnalyze").onclick = async () => {
             `θmech[0:16]=${j.theta_dbg.mech_first16.join(",")}`,
             `θelec[0:16]=${j.theta_dbg.elec_first16.join(",")}`,
           ].join("\n")
+        : "",
+      j.omega_from_theta
+        ? `ω(from θ): mean=${j.omega_from_theta.mean_rad_s} amp=±${j.omega_from_theta.amp_rad_s} rel=${(100 * j.omega_from_theta.rel_amp).toFixed(1)}% f=${j.omega_from_theta.ripple_hz}Hz cyc/rev=${j.omega_from_theta.cycles_per_rev} bestN=${j.omega_from_theta.best_harmonic}`
+        : "",
+      j.iq_ripple
+        ? `Iq ripple: mean=${j.iq_ripple.mean_A}A amp=±${j.iq_ripple.amp_A}A f=${j.iq_ripple.freq_hz}Hz`
         : "",
       "解读: dq/相≈1→offset/1x · ≈2→增益失配/2x · 相频/期望≈1→极对数对 · 极对数实测≠14→角度换算 bug",
     ].join("\n");

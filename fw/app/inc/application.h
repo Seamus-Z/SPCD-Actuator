@@ -2,6 +2,9 @@
 // Host command parsing lives in binary_commands.h.
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #include "HAL/fdcan.h"
 #include "HAL/millisecond_timer.h"
 #include "HAL/phase_current_adc.h"
@@ -15,6 +18,7 @@
 #include "calibration/l_ident.h"
 #include "calibration/cogging.h"
 #include "math/cogging.h"
+#include "math/encoder_comp.h"
 #include "device/ma600.h"
 #include "foc_ctrl/current_loop.h"
 #include "foc_ctrl/encoder_pll.h"
@@ -89,6 +93,11 @@ class Application
   void ApplyCoggingResult();
   void PersistCoggingResult();
   float CoggingComp() const;
+  void SetEncoderCompChunk(uint8_t chunk, const int8_t* data, size_t len);
+  void ClearEncoderComp();
+  bool CommitEncoderComp(float scale_rad, bool persist);
+  void PersistEncoderCompResult();
+  float EncoderCompRad() const;
   // moteus-style: Finish previous SPI, run PLL, then Start next SPI.
   void UpdateEncoderPll(float dt_s);
   float CompensatedMechRad() const;
@@ -125,6 +134,12 @@ class Application
   math::CoggingTable cogging_table_{};
   float cogging_scale_ = 0.0f;
   bool cogging_valid_ = false;
+  math::EncoderCompTable encoder_comp_table_{};
+  float encoder_comp_scale_ = 0.0f;
+  bool encoder_comp_valid_ = false;
+  bool encoder_comp_dirty_ = false;
+  bool encoder_comp_persisted_ = false;
+  uint8_t encoder_comp_chunk_mask_ = 0;
   uint8_t last_cal_kind_ = 0;  // kCalSub* of the most recently started cal
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType telem_last_us_ = 0;

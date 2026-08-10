@@ -54,6 +54,7 @@ from xt_proto import (  # noqa: E402
     pack_cal_r,
     pack_cal_l,
     pack_cal_cogging,
+    pack_enc_comp_clear,
     pack_raw,
     pack_vel,
     pack_info,
@@ -64,6 +65,7 @@ from xt_proto import (  # noqa: E402
     cmd_id,
     tel_id,
 )
+import compensate_encoder as _enc_comp  # noqa: E402
 
 # Linux ARPHRD_CAN
 _ARPHRD_CAN = "280"
@@ -340,6 +342,8 @@ class CanBridge:
         self._stream_hz = 50.0
         self._telem_ring: deque[dict] = deque(maxlen=256)
         self._telem_sid = 0
+        self._enc_comp_capture = False
+        self._enc_comp_rows: list[tuple[float, float]] = []
         self._rx_count = 0
         self._rx_window_t0 = time.monotonic()
         self._rx_hz = 0.0
@@ -555,6 +559,11 @@ class CanBridge:
                     )
                     sample["enc_spike"] = int(msg.enc_spike)
                     self._push_live_sample(sample)
+                    if self._enc_comp_capture:
+                        frac = (float(msg.enc_raw) / 65536.0) % 1.0
+                        self._enc_comp_rows.append(
+                            (frac, float(msg.omega_mech_rad_s))
+                        )
                 self.msglog.maybe_ctrl(msg)
                 try:
                     self._replies.put_nowait(msg)
@@ -809,6 +818,141 @@ class CanBridge:
             "motor_error": None,
             "info": info.as_dict(),
         }
+
+    def clear_encoder_comp(self) -> dict:
+        """Disable/clear moteus-style encoder geometric compensation."""
+        if self.bus is None:
+            return {"ok": False, "error": "CAN not connected"}
+        with self._lock:
+            saved_op = self._stream_op
+            saved_args = dict(self._stream_args)
+            self._stream_op = ""
+        try:
+            self._drain_queues()
+            ack = self.send_cmd(pack_enc_comp_clear(self._next_seq()))
+            time.sleep(0.2)
+            ok = int(getattr(ack, "status", 1)) == STATUS_OK
+            self.msglog.push("SYS", f"enc_comp clear status={getattr(ack, 'status', -1)}")
+            return {
+                "ok": ok,
+                "status": int(getattr(ack, "status", -1)),
+                "action": "clear",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "action": "clear"}
+        finally:
+            with self._lock:
+                self._stream_op = saved_op
+                self._stream_args = saved_args
+
+    def run_encoder_comp(
+        self,
+        omega_mech: float = 40.0,
+        seconds: float = 8.0,
+        rate_hz: float = 200.0,
+        from_snap: bool = False,
+    ) -> dict:
+        """Inertial encoder geometric compensation (256-point table)."""
+        if self.bus is None:
+            return {"ok": False, "error": "CAN not connected"}
+
+        source = "snap" if from_snap else "live"
+        result = None
+        with self._lock:
+            saved_op = self._stream_op
+            saved_args = dict(self._stream_args)
+            self._stream_op = ""
+        try:
+            if from_snap:
+                snap = self.last_snap
+                if not snap:
+                    return {"ok": False, "error": "no snapshot yet — 先 Capture 一次"}
+                rows = _enc_comp.samples_from_snap_dict(snap)
+                result = _enc_comp.build_table(rows)
+            else:
+                omega_mech = float(omega_mech)
+                seconds = max(1.0, float(seconds))
+                rate_hz = max(20.0, float(rate_hz))
+                if abs(omega_mech) < 5.0:
+                    return {
+                        "ok": False,
+                        "error": "ω 太小（建议 ≥20，推荐 40~200）",
+                    }
+                self._drain_queues()
+                with self._lock:
+                    self._enc_comp_rows = []
+                    self._enc_comp_capture = True
+                period = 1.0 / rate_hz
+                t0 = time.monotonic()
+                next_t = t0
+                try:
+                    while time.monotonic() - t0 < seconds:
+                        seq = self._next_seq()
+                        self._send_raw(pack_vel(omega_mech, 0.0, seq), log=False)
+                        next_t += period
+                        delay = next_t - time.monotonic()
+                        if delay > 0:
+                            time.sleep(delay)
+                        else:
+                            next_t = time.monotonic()
+                finally:
+                    with self._lock:
+                        self._enc_comp_capture = False
+                        rows = list(self._enc_comp_rows)
+                        self._enc_comp_rows = []
+                try:
+                    self.send_cmd(pack_stop(self._next_seq()), timeout=0.5)
+                except Exception:
+                    try:
+                        self._send_raw(pack_stop(self._next_seq()), log=False)
+                    except Exception:
+                        pass
+                if len(rows) < 256:
+                    return {
+                        "ok": False,
+                        "error": f"样本不足 ({len(rows)} < 256)，加长秒数或提高 rate",
+                        "n_samples": len(rows),
+                    }
+                result = _enc_comp.build_table(rows)
+
+            self._drain_queues()
+
+            def _send(payload: bytes):
+                return self.send_cmd(payload, timeout=1.0)
+
+            _enc_comp.upload_with_sender(
+                _send,
+                result["table"],
+                result["peak_rad"],
+                clear_first=True,
+                next_seq=self._next_seq,
+            )
+            self.msglog.push(
+                "SYS",
+                f"enc_comp ok source={source} peak={result['peak_rad']:.4f}rad "
+                f"dev_std={100 * result['vel_dev_std']:.2f}%",
+            )
+            return {
+                "ok": True,
+                "action": "commit",
+                "source": source,
+                "mean_omega": result["mean_omega"],
+                "vel_dev_std": result["vel_dev_std"],
+                "peak_rad": result["peak_rad"],
+                "peak_deg": result["peak_rad"] * 180.0 / math.pi,
+                "filled_bins": result["filled_bins"],
+                "n_samples": result["n_samples"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._send_raw(pack_stop(self._next_seq()), log=False)
+            except Exception:
+                pass
+            return {"ok": False, "error": str(exc), "action": "commit"}
+        finally:
+            with self._lock:
+                self._stream_op = saved_op
+                self._stream_args = saved_args
 
     def capture_snap(
         self,
@@ -1194,6 +1338,37 @@ def make_handler(bridge: CanBridge):
                 except Exception as exc:  # noqa: BLE001
                     self._json(500, {"ok": False, "error": str(exc)})
                 return
+            if path == "/api/snap/export":
+                try:
+                    snap = bridge.last_snap
+                    if not snap:
+                        self._json(200, {"ok": False, "error": "no snapshot yet"})
+                        return
+                    w = float(req.get("omega_mech", 0) or 0)
+                    name = str(req.get("filename") or "").strip()
+                    if not name:
+                        name = f"snap_{int(w)}.json" if w > 0 else "snap_last.json"
+                    # Keep writes inside the host tools root.
+                    out_dir = HOST_ROOT
+                    out_path = (out_dir / Path(name).name).resolve()
+                    if out_dir not in out_path.parents and out_path.parent != out_dir:
+                        self._json(400, {"ok": False, "error": "bad filename"})
+                        return
+                    payload = dict(snap)
+                    payload["omega_mech_rad_s"] = w
+                    out_path.write_text(json.dumps(payload, indent=2))
+                    self._json(
+                        200,
+                        {
+                            "ok": True,
+                            "path": str(out_path),
+                            "n_samples": payload.get("n_samples"),
+                            "sample_hz": payload.get("sample_hz"),
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._json(500, {"ok": False, "error": str(exc)})
+                return
             if path == "/api/snap/analyze":
                 try:
                     snap = bridge.last_snap
@@ -1230,6 +1405,31 @@ def make_handler(bridge: CanBridge):
             if path == "/api/messages/clear":
                 bridge.msglog.clear()
                 self._json(200, {"ok": True})
+                return
+            if path == "/api/enc_comp":
+                try:
+                    action = str(req.get("action") or "run").strip()
+                    if action == "clear":
+                        self._json(200, bridge.clear_encoder_comp())
+                    elif action in ("run", "live"):
+                        self._json(
+                            200,
+                            bridge.run_encoder_comp(
+                                omega_mech=float(req.get("omega_mech", 40)),
+                                seconds=float(req.get("seconds", 8)),
+                                rate_hz=float(req.get("rate", 200)),
+                                from_snap=False,
+                            ),
+                        )
+                    elif action in ("from_snap", "snap"):
+                        self._json(
+                            200,
+                            bridge.run_encoder_comp(from_snap=True),
+                        )
+                    else:
+                        self._json(400, {"ok": False, "error": f"bad action {action}"})
+                except Exception as exc:  # noqa: BLE001
+                    self._json(500, {"ok": False, "error": str(exc)})
                 return
             if path != "/api/cmd":
                 self.send_error(404)

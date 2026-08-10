@@ -27,6 +27,7 @@ CMD_SNAP = 5
 CMD_VEL = 6
 CMD_CAL = 7
 CMD_QUERY = 8
+CMD_ENC_COMP = 9
 
 CAL_SUB_ABORT = 0
 CAL_SUB_ENC_PHASE = 1
@@ -35,6 +36,12 @@ CAL_SUB_BEMF_IDENT = 3  # closed-loop Ke sweep; see xt_can.h kCalSubBemf
 CAL_SUB_RESISTANCE = 4  # Id sweep; see xt_can.h kCalSubResistance
 CAL_SUB_INDUCTANCE = 5  # Vd step response; see xt_can.h kCalSubInductance
 CAL_SUB_COGGING = 6     # slow spin q-current map; see xt_can.h kCalSubCogging
+
+ENC_COMP_OP_CLEAR = 0
+ENC_COMP_OP_CHUNK = 1
+ENC_COMP_OP_COMMIT = 2
+ENC_COMP_TABLE_SIZE = 256
+ENC_COMP_CHUNK_SIZE = 32
 
 STATUS_OK = 0
 STATUS_BAD_LEN = 1
@@ -232,6 +239,48 @@ def pack_cal_cogging(
         0,
         int(round(record_revs * 100)),          # voltage_mV field reused
         int(round(velocity_mech_rad_s * 1000)),  # omega_elec_mrad_s reused
+    )
+
+
+def pack_enc_comp_clear(seq: int = 0) -> bytes:
+    """Disable and clear the encoder geometric compensation table."""
+    return pack_header(TYPE_CMD, seq) + bytes([CMD_ENC_COMP]) + struct.pack(
+        "<BBHi32s",
+        ENC_COMP_OP_CLEAR,
+        0,
+        0,
+        0,
+        bytes(32),
+    )
+
+
+def pack_enc_comp_chunk(chunk: int, data: bytes, seq: int = 0) -> bytes:
+    """Upload one 32-byte chunk (chunk index 0..7) of the 256-byte table."""
+    if chunk < 0 or chunk > 7:
+        raise ValueError("chunk must be 0..7")
+    raw = bytes(data)
+    if len(raw) != ENC_COMP_CHUNK_SIZE:
+        raise ValueError("chunk data must be 32 bytes")
+    return pack_header(TYPE_CMD, seq) + bytes([CMD_ENC_COMP]) + struct.pack(
+        "<BBHi32s",
+        ENC_COMP_OP_CHUNK,
+        int(chunk) & 0xFF,
+        0,
+        0,
+        raw,
+    )
+
+
+def pack_enc_comp_commit(peak_corr_rad: float, seq: int = 0) -> bytes:
+    """Enable table. peak_corr_rad is max |correction| in radians."""
+    scale_urad = int(round(float(peak_corr_rad) * 1_000_000.0))
+    return pack_header(TYPE_CMD, seq) + bytes([CMD_ENC_COMP]) + struct.pack(
+        "<BBHi32s",
+        ENC_COMP_OP_COMMIT,
+        0,
+        0,
+        scale_urad,
+        bytes(32),
     )
 
 

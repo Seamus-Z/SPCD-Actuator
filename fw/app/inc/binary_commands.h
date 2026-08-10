@@ -31,6 +31,7 @@ class BinaryCommands
   uint8_t HandleRaw(const uint8_t* payload, size_t payload_len);
   uint8_t HandleInfo(uint8_t seq);
   uint8_t HandleSnap(uint8_t seq, const uint8_t* payload, size_t payload_len);
+  uint8_t HandleEncComp(const uint8_t* payload, size_t payload_len);
 
   Application* app_ = nullptr;
 };

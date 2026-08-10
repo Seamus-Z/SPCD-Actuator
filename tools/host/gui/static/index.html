@@ -106,6 +106,7 @@
             <button id="btnSnap" type="button">Capture</button>
             <label class="inlineChk">ω <input id="snapOmega" type="number" step="1" value="200" style="width:4rem" title="当前机械转速 rad/s，用于对比期望电频率" /></label>
             <button class="ghost" id="btnSnapAnalyze" type="button">分析</button>
+            <button class="ghost" id="btnSnapExport" type="button">Export JSON</button>
             <button class="ghost" id="btnSnapAuto" type="button">Autoscale</button>
           </div>
         </div>
@@ -132,8 +133,9 @@
           <h2>标定 / 辨识</h2>
         </div>
         <p class="hint" style="margin-top:0">
-          参考 moteus：推荐顺序为 R → Ld/Lq → 编码器转圈映射 → Ke。
+          参考 moteus：推荐顺序为 R → Ld/Lq → 编码器转圈映射 → 编码器几何补偿 → 齿槽 → Ke。
           转圈映射会以恒定 D 轴电流正反各转两圈，并以受限加速度平滑换向；生成的 64 点周期换相补偿表会保存到 Flash NVS。
+          「编码器几何补偿」用恒速惯性法生成 256 点表，压磁环偏心/倾斜带来的 1/2 次速度纹波（对应 Live 上约 10% 慢正弦）。
           DM4310 建议 40 elec rad/s、1.0 A 起步；固件将转圈速度限制为 80、校准电流限制为 2.0 A。
           「锁定校准」只辨识单一全局 offset，用于低速诊断，不能替代转圈映射。
         </p>
@@ -145,6 +147,7 @@
           <option value="l">Ld/Lq 电感辨识（电压阶跃，无需编码器）</option>
           <option value="bemf">Ke 反电动势辨识（闭环速度扫描）</option>
           <option value="cogging">齿槽补偿标定（慢速正反转映射，需先标编码器）</option>
+          <option value="enc_comp">编码器几何补偿（256 点，压 2/rev 纹波）</option>
         </select>
         <div id="calParamsEnc">
           <label>校准电流 A（建议 1.0 A，最高 2.0 A）</label>
@@ -176,8 +179,19 @@
           <label>每方向记录圈数（越高越稳，建议 4；高速时加大）</label>
           <input id="calCoggingRevs" type="number" step="1" min="1" value="4" />
         </div>
+        <div id="calParamsEncComp" hidden>
+          <label>恒速 ω mech (rad/s) — 建议 40~200（越高越不易混进 14/rev）</label>
+          <input id="calEncCompOmega" type="number" step="1" min="5" max="200" value="40" />
+          <label>采集时长 s（建议 8，至少转满 1 圈）</label>
+          <input id="calEncCompSeconds" type="number" step="1" min="2" max="30" value="8" />
+          <label>采集频率 Hz（主机发 vel / 收回报）</label>
+          <input id="calEncCompRate" type="number" step="10" min="50" max="500" value="200" />
+          <p class="hint">开始后电机会按设定速度转几秒，自动生成并写入 256 点补偿表。也可用上次 Snapshot。</p>
+        </div>
         <div class="row" style="margin-top:0.8rem">
           <button id="btnCalStart" type="button">开始标定</button>
+          <button class="ghost" id="btnEncCompFromSnap" type="button" hidden>用上次 Snap</button>
+          <button class="ghost" id="btnEncCompClear" type="button" hidden>清除几何补偿</button>
           <button class="stop" id="btnCalAbort" type="button">中止</button>
         </div>
         <div class="status" id="calStatus">idle</div>

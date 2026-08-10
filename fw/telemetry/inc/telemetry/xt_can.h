@@ -36,11 +36,13 @@ inline constexpr uint8_t kCmdVel = 6;
 inline constexpr uint8_t kCmdCal = 7;
 // Idle poll: no mode change, reply with CtrlReply.
 inline constexpr uint8_t kCmdQuery = 8;
+// Upload moteus-style encoder geometric compensation table.
+inline constexpr uint8_t kCmdEncComp = 9;
 
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 4;
-inline constexpr uint8_t kFwPatch = 17;
+inline constexpr uint8_t kFwPatch = 18;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -81,6 +83,11 @@ inline constexpr uint8_t kCalSubInductance = 5;
 // x100 (0 => firmware default). CalTelem reuses offset_mrad for the table
 // scale (peak A) *1e6 and residual_mrad for peak current *1e6.
 inline constexpr uint8_t kCalSubCogging = 6;
+
+// kCmdEncComp payload ops (after cmd byte).
+inline constexpr uint8_t kEncCompOpClear = 0;   // disable + zero table, persist
+inline constexpr uint8_t kEncCompOpChunk = 1;   // write 32-byte chunk
+inline constexpr uint8_t kEncCompOpCommit = 2;  // enable with scale, persist
 
 inline constexpr uint8_t kStatusOk = 0;
 inline constexpr uint8_t kStatusBadLen = 1;
@@ -242,6 +249,19 @@ struct CtrlReply
   int32_t omega_cmd_mrad_s;
   int32_t omega_elec_mrad_s;
   int32_t voltage_headroom_mV;
+} __attribute__((packed));
+
+// Host -> device: after cmd byte for kCmdEncComp.
+// Chunk write: op=Chunk, chunk=0..7, data[32]
+// Commit: op=Commit, scale_urad = peak|corr| in microradians (scale = peak/127)
+// Clear: op=Clear
+struct EncCompRequest
+{
+  uint8_t op;
+  uint8_t chunk;
+  uint8_t reserved[2];
+  int32_t scale_urad;
+  int8_t data[32];
 } __attribute__((packed));
 
 // Host -> device: after cmd byte for kCmdCal.

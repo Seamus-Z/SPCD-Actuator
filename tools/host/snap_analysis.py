@@ -157,6 +157,67 @@ def analyze(snap, pole_pairs=14.0, omega_mech_rad_s=0.0):
             f_elec_expected = omega_mech_rad_s * pole_pairs / (2.0 * math.pi)
             out["f_elec_expected_hz"] = round(f_elec_expected, 1)
             out["f_phase_over_f_expected"] = round(f_phase / f_elec_expected, 3)
+
+    # Velocity ripple from d(θ_mech)/dt + harmonic projection vs θ.
+    # Prefer harmonic amps over zero-crossings: differentiating θ amplifies
+    # quantization and makes zero-cross frequency estimates meaningless.
+    if len(tm) > 16:
+        tm_u = _unwrap_series(list(tm))
+        dt = 1.0 / hz if hz > 0 else 1.0
+        om = []
+        for i in range(1, len(tm_u) - 1):
+            om.append((tm_u[i + 1] - tm_u[i - 1]) / (2.0 * dt))
+        if len(om) >= 32:
+            mean_w = sum(om) / len(om)
+            th = tm_u[1:len(tm_u) - 1]
+            amp_w = pkpk(om)
+            rel = (amp_w / abs(mean_w)) if abs(mean_w) > 1e-3 else 0.0
+            f_mech = abs(mean_w) / (2.0 * math.pi)
+
+            def harm_amp(sig, angles, n_harm):
+                mu = sum(sig) / len(sig)
+                n = len(sig)
+                s = c = 0.0
+                for v, a in zip(sig, angles):
+                    s += (v - mu) * math.sin(n_harm * a)
+                    c += (v - mu) * math.cos(n_harm * a)
+                return 2.0 * math.hypot(s, c) / n
+
+            harms = {}
+            best_n, best_amp = 0, -1.0
+            for n_harm in (1, 2, 3, 4, 7, 14, 28):
+                a = harm_amp(om, th, n_harm)
+                harms[str(n_harm)] = round(a, 3)
+                if a > best_amp:
+                    best_amp, best_n = a, n_harm
+            out["omega_from_theta"] = {
+                "mean_rad_s": round(mean_w, 3),
+                "amp_rad_s": round(amp_w, 3),
+                "rel_amp": round(rel, 4),
+                "f_mech_hz": round(f_mech, 2),
+                "best_harmonic": best_n,
+                "best_harmonic_amp": round(best_amp, 3),
+                "harmonics_rad_s": harms,
+            }
+            iq = list(series.get("iq_a", []))
+            ida = list(series.get("id_a", []))
+            if len(iq) == len(tm):
+                iq_s = iq[1:len(tm) - 1]
+                id_s = ida[1:len(tm) - 1] if len(ida) == len(tm) else []
+                iq_m = sum(iq_s) / len(iq_s)
+                out["iq_ripple"] = {
+                    "mean_A": round(iq_m, 4),
+                    "amp_A": round(pkpk(iq_s), 4),
+                    "harm14_A": round(harm_amp(iq_s, th, 14), 3),
+                    "harm2_A": round(harm_amp(iq_s, th, 2), 3),
+                }
+                if id_s:
+                    out["id_ripple"] = {
+                        "mean_A": round(sum(id_s) / len(id_s), 4),
+                        "amp_A": round(pkpk(id_s), 4),
+                        "harm14_A": round(harm_amp(id_s, th, 14), 3),
+                        "harm2_A": round(harm_amp(id_s, th, 2), 3),
+                    }
     return out
 
 
@@ -187,6 +248,29 @@ def _fmt(out):
     if "pp_measured" in out:
         lines.append(f"pp_measured(Δθelec/Δθmech)={out['pp_measured']} "
                      f"(expect 14)")
+    if "omega_from_theta" in out:
+        o = out["omega_from_theta"]
+        h = o.get("harmonics_rad_s", {})
+        htxt = " ".join(f"{k}:{v}" for k, v in h.items())
+        lines.append(
+            f"ω(from θ): mean={o['mean_rad_s']} amp=±{o['amp_rad_s']} "
+            f"rel={100*o['rel_amp']:.1f}% bestN={o['best_harmonic']} "
+            f"(amp {o.get('best_harmonic_amp', '?')})"
+        )
+        if htxt:
+            lines.append(f"ω harmonics[rad/s]: {htxt}")
+    if "iq_ripple" in out:
+        q = out["iq_ripple"]
+        lines.append(
+            f"Iq ripple: mean={q['mean_A']}A amp=±{q['amp_A']}A "
+            f"H2={q.get('harm2_A','?')}A H14={q.get('harm14_A','?')}A"
+        )
+    if "id_ripple" in out:
+        d = out["id_ripple"]
+        lines.append(
+            f"Id ripple: mean={d['mean_A']}A amp=±{d['amp_A']}A "
+            f"H2={d.get('harm2_A','?')}A H14={d.get('harm14_A','?')}A"
+        )
     lines.append("")
     lines.append("read as:")
     lines.append("  dq_over_phase≈1  -> offset/1x;  ≈2 -> gain imbalance/2x")

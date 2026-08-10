@@ -8,6 +8,7 @@
 
 #include "math/commutation.h"
 #include "math/cogging.h"
+#include "math/encoder_comp.h"
 #include "stm32g4xx_hal.h"
 
 namespace nvs
@@ -30,13 +31,16 @@ struct EncoderCalData
   math::CoggingTable cogging_table{};
   float cogging_scale = 0.0f;
   bool cogging_valid = false;
+  math::EncoderCompTable encoder_comp_table{};
+  float encoder_comp_scale = 0.0f;  // rad per int8 LSB
+  bool encoder_comp_valid = false;
 };
 
 class EncoderCalStore
 {
  public:
   static constexpr uint32_t kMagic = 0x58454E43u;  // 'XENC'
-  static constexpr uint32_t kVersion = 6u;
+  static constexpr uint32_t kVersion = 7u;
   static constexpr uint32_t kBaseAddr = 0x0807F000u;
   static constexpr uint32_t kSize = 0x1000u;
   static constexpr uint32_t kBank = FLASH_BANK_2;
@@ -96,6 +100,28 @@ class EncoderCalStore
     uint32_t crc = 0;
   } __attribute__((packed));
 
+  struct RecordV6
+  {
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    float offset_rad = 0.0f;
+    float sign = 1.0f;
+    float commutation_offset_rad[math::kCommutationTableSize]{};
+    uint32_t commutation_valid = 0;
+    float commutation_residual_rad = 0.0f;
+    float bemf_v_per_hz = 0.0f;
+    uint32_t bemf_valid = 0;
+    float resistance_ohm = 0.0f;
+    uint32_t resistance_valid = 0;
+    float inductance_d_H = 0.0f;
+    float inductance_q_H = 0.0f;
+    uint32_t inductance_valid = 0;
+    int8_t cogging_table[math::kCoggingTableSize]{};
+    float cogging_scale = 0.0f;
+    uint32_t cogging_valid = 0;
+    uint32_t crc = 0;
+  } __attribute__((packed));
+
   struct Record
   {
     uint32_t magic = 0;
@@ -115,6 +141,9 @@ class EncoderCalStore
     int8_t cogging_table[math::kCoggingTableSize]{};
     float cogging_scale = 0.0f;
     uint32_t cogging_valid = 0;
+    int8_t encoder_comp_table[math::kEncoderCompTableSize]{};
+    float encoder_comp_scale = 0.0f;
+    uint32_t encoder_comp_valid = 0;
     uint32_t crc = 0;
   } __attribute__((packed));
 
@@ -164,6 +193,46 @@ class EncoderCalStore
                   sizeof(rec.cogging_table));
       out->cogging_scale = rec.cogging_scale;
       out->cogging_valid = rec.cogging_valid != 0;
+      std::memcpy(out->encoder_comp_table.data(), rec.encoder_comp_table,
+                  sizeof(rec.encoder_comp_table));
+      out->encoder_comp_scale = rec.encoder_comp_scale;
+      out->encoder_comp_valid =
+          rec.encoder_comp_valid != 0 && rec.encoder_comp_scale > 0.0f;
+      return true;
+    }
+
+    if (header[1] == 6u)
+    {
+      RecordV6 rec{};
+      std::memcpy(&rec, reinterpret_cast<const void*>(kBaseAddr), sizeof(rec));
+      if (rec.crc != CrcBytes(&rec, offsetof(RecordV6, crc)) ||
+          !(rec.sign == 1.0f || rec.sign == -1.0f))
+      {
+        return false;
+      }
+      *out = EncoderCalData{};
+      out->offset_rad = rec.offset_rad;
+      out->sign = rec.sign;
+      std::memcpy(out->commutation_offset_rad.data(),
+                  rec.commutation_offset_rad,
+                  sizeof(rec.commutation_offset_rad));
+      out->commutation_residual_rad = rec.commutation_residual_rad;
+      out->commutation_valid =
+          rec.commutation_valid != 0 &&
+          rec.commutation_residual_rad >= 0.0f &&
+          rec.commutation_residual_rad <= math::kMaxCommutationResidualRad;
+      out->bemf_v_per_hz = rec.bemf_v_per_hz;
+      out->bemf_valid = rec.bemf_valid != 0;
+      out->resistance_ohm = rec.resistance_ohm;
+      out->resistance_valid = rec.resistance_valid != 0;
+      out->inductance_d_H = rec.inductance_d_H;
+      out->inductance_q_H = rec.inductance_q_H;
+      out->inductance_valid = rec.inductance_valid != 0;
+      std::memcpy(out->cogging_table.data(), rec.cogging_table,
+                  sizeof(rec.cogging_table));
+      out->cogging_scale = rec.cogging_scale;
+      out->cogging_valid = rec.cogging_valid != 0;
+      // V6 had no encoder geometric compensation table.
       return true;
     }
 
@@ -275,6 +344,11 @@ class EncoderCalStore
                 sizeof(rec.cogging_table));
     rec.cogging_scale = data.cogging_scale;
     rec.cogging_valid = data.cogging_valid ? 1u : 0u;
+    std::memcpy(rec.encoder_comp_table, data.encoder_comp_table.data(),
+                sizeof(rec.encoder_comp_table));
+    rec.encoder_comp_scale = data.encoder_comp_scale;
+    rec.encoder_comp_valid =
+        (data.encoder_comp_valid && data.encoder_comp_scale > 0.0f) ? 1u : 0u;
     rec.crc = CrcBytes(&rec, offsetof(Record, crc));
 
     HAL_FLASH_Unlock();
@@ -333,7 +407,13 @@ class EncoderCalStore
             (verify.cogging_scale == data.cogging_scale &&
              std::memcmp(verify.cogging_table.data(),
                          data.cogging_table.data(),
-                         sizeof(rec.cogging_table)) == 0));
+                         sizeof(rec.cogging_table)) == 0)) &&
+           verify.encoder_comp_valid == (rec.encoder_comp_valid != 0) &&
+           (!verify.encoder_comp_valid ||
+            (verify.encoder_comp_scale == data.encoder_comp_scale &&
+             std::memcmp(verify.encoder_comp_table.data(),
+                         data.encoder_comp_table.data(),
+                         sizeof(rec.encoder_comp_table)) == 0));
   }
 
  private:

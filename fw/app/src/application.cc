@@ -165,6 +165,14 @@ bool Application::Init()
     cogging_valid_ = true;
     cogging_cal_persisted_ = true;
   }
+  if (cal_loaded && cal.encoder_comp_valid)
+  {
+    encoder_comp_table_ = cal.encoder_comp_table;
+    encoder_comp_scale_ = cal.encoder_comp_scale;
+    encoder_comp_valid_ = true;
+    encoder_comp_persisted_ = true;
+    encoder_comp_chunk_mask_ = 0xFFu;
+  }
 
   telem_last_us_ = timer_->read_us();
   LedOn();
@@ -206,6 +214,11 @@ void Application::RunOnce()
   {
     PersistCoggingResult();
     cogging_cal_dirty_ = false;
+  }
+  if (encoder_comp_dirty_)
+  {
+    PersistEncoderCompResult();
+    encoder_comp_dirty_ = false;
   }
 
   PollCan();
@@ -1076,12 +1089,13 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
 
 float Application::CompensatedMechRad() const
 {
-  // moteus order: apply electrical commutation table in mechanical domain
-  // before the PLL (equivalent to folding motor.offset into compensated_value).
+  // moteus order: raw(+sign/offset) -> encoder geometric compensation ->
+  // electrical commutation table (folded into mech) -> PLL.
   const float pp = board::MotorParams().pole_pairs;
+  const float enc_corr = EncoderCompRad();
   const float corr_m =
       (pp > 1.0e-6f) ? (ma600_->commutation_offset_rad() / pp) : 0.0f;
-  return math::WrapZeroToTwoPi(enc_theta_mech_rad_ + corr_m);
+  return math::WrapZeroToTwoPi(enc_theta_mech_rad_ + enc_corr + corr_m);
 }
 
 void Application::SampleEncoder()
@@ -1350,6 +1364,80 @@ float Application::CoggingComp() const
   }
   return math::InterpolateCogging(cogging_table_, cogging_scale_,
                                   enc_theta_mech_rad_);
+}
+
+float Application::EncoderCompRad() const
+{
+  if (!encoder_comp_valid_)
+  {
+    return 0.0f;
+  }
+  // Index by raw counts angle (moteus indexes pre-compensation encoder).
+  return math::InterpolateEncoderComp(encoder_comp_table_, encoder_comp_scale_,
+                                      enc_counts_rad_);
+}
+
+void Application::ClearEncoderComp()
+{
+  encoder_comp_table_.fill(0);
+  encoder_comp_scale_ = 0.0f;
+  encoder_comp_valid_ = false;
+  encoder_comp_chunk_mask_ = 0;
+  encoder_comp_dirty_ = true;
+  encoder_comp_persisted_ = false;
+}
+
+void Application::SetEncoderCompChunk(uint8_t chunk, const int8_t* data,
+                                      size_t len)
+{
+  constexpr size_t kChunk = 32u;
+  if (data == nullptr || chunk >= 8u || len < kChunk)
+  {
+    return;
+  }
+  const size_t base = static_cast<size_t>(chunk) * kChunk;
+  for (size_t i = 0; i < kChunk; ++i)
+  {
+    encoder_comp_table_[base + i] = data[i];
+  }
+  encoder_comp_chunk_mask_ =
+      static_cast<uint8_t>(encoder_comp_chunk_mask_ | (1u << chunk));
+}
+
+bool Application::CommitEncoderComp(float scale_rad, bool persist)
+{
+  if (scale_rad <= 0.0f || encoder_comp_chunk_mask_ != 0xFFu)
+  {
+    encoder_comp_valid_ = false;
+    encoder_comp_scale_ = 0.0f;
+    return false;
+  }
+  encoder_comp_scale_ = scale_rad;
+  encoder_comp_valid_ = true;
+  if (persist)
+  {
+    encoder_comp_dirty_ = true;
+    encoder_comp_persisted_ = false;
+  }
+  return true;
+}
+
+void Application::PersistEncoderCompResult()
+{
+  if (!encoder_comp_valid_ || encoder_comp_scale_ <= 0.0f)
+  {
+    // Allow persisting a clear (disabled) table too.
+  }
+  nvs::EncoderCalData data{};
+  nvs::EncoderCalStore::Load(&data);
+  data.encoder_comp_table = encoder_comp_table_;
+  data.encoder_comp_scale = encoder_comp_scale_;
+  data.encoder_comp_valid = encoder_comp_valid_ && encoder_comp_scale_ > 0.0f;
+  if (phase_pwm_.get() != nullptr)
+  {
+    phase_pwm_->DisableControlIsr();
+  }
+  encoder_comp_persisted_ = nvs::EncoderCalStore::Save(data);
 }
 
 telemetry::xt_can::EncTelem Application::BuildEncTelem() const

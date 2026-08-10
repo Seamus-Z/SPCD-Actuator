@@ -95,6 +95,9 @@ uint8_t BinaryCommands::Handle(uint8_t cmd, uint8_t seq, const uint8_t* payload,
     case telemetry::xt_can::kCmdSnap:
       status = HandleSnap(seq, payload, payload_len);
       break;
+    case telemetry::xt_can::kCmdEncComp:
+      status = HandleEncComp(payload, payload_len);
+      break;
     default:
       status = telemetry::xt_can::kStatusBadCmd;
       break;
@@ -326,6 +329,52 @@ uint8_t BinaryCommands::HandleVfoc(const uint8_t* payload, size_t payload_len)
   app_->mode_ = telemetry::xt_can::kModeVfoc;
   app_->StartControlIsr();
   return telemetry::xt_can::kStatusOk;
+}
+
+uint8_t BinaryCommands::HandleEncComp(const uint8_t* payload,
+                                        size_t payload_len)
+{
+  if (app_->state_ != State::RUN)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (payload == nullptr ||
+      payload_len < sizeof(telemetry::xt_can::EncCompRequest))
+  {
+    return telemetry::xt_can::kStatusBadLen;
+  }
+  telemetry::xt_can::EncCompRequest req{};
+  std::memcpy(&req, payload, sizeof(req));
+  if (req.op == telemetry::xt_can::kEncCompOpClear)
+  {
+    app_->ClearEncoderComp();
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (req.op == telemetry::xt_can::kEncCompOpChunk)
+  {
+    if (req.chunk >= 8u)
+    {
+      return telemetry::xt_can::kStatusBadCmd;
+    }
+    app_->SetEncoderCompChunk(req.chunk, req.data, sizeof(req.data));
+    return telemetry::xt_can::kStatusOk;
+  }
+  if (req.op == telemetry::xt_can::kEncCompOpCommit)
+  {
+    const float peak_rad = static_cast<float>(req.scale_urad) * 1.0e-6f;
+    if (peak_rad <= 0.0f)
+    {
+      return telemetry::xt_can::kStatusBadCmd;
+    }
+    // Host sends peak |correction| [rad]; store rad-per-LSB = peak/127.
+    const float scale = peak_rad / 127.0f;
+    if (!app_->CommitEncoderComp(scale, true))
+    {
+      return telemetry::xt_can::kStatusFail;
+    }
+    return telemetry::xt_can::kStatusOk;
+  }
+  return telemetry::xt_can::kStatusBadCmd;
 }
 
 uint8_t BinaryCommands::HandleCal(const uint8_t* payload, size_t payload_len)

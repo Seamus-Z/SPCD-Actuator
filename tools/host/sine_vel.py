@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """1 kHz host-side sinusoidal velocity command for bandwidth tests.
 
-Default: ω = 200 * sin(2π * 10 * t) rad/s on can0.
+Default: ω = 200 * sin(2π * 0.5 * t) rad/s on can0.
 
 Usage:
   # bring CAN up first if needed
@@ -9,7 +9,7 @@ Usage:
 
   # stop GUI vel stream first (only one host should command the motor)
   python3 tools/host/sine_vel.py
-  python3 tools/host/sine_vel.py --freq 10 --amp 200 --rate 1000 --seconds 10
+  python3 tools/host/sine_vel.py --freq 0.5 --amp 200 --rate 1000 --seconds 10
 
 Ctrl+C sends stop.
 """
@@ -50,7 +50,7 @@ def main() -> int:
     )
     p.add_argument("--iface", "--interface", default="can0", dest="iface")
     p.add_argument("--node", type=int, default=1)
-    p.add_argument("--freq", type=float, default=10.0, help="sine frequency [Hz]")
+    p.add_argument("--freq", type=float, default=0.5, help="sine frequency [Hz]")
     p.add_argument(
         "--amp",
         type=float,

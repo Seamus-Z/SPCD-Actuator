@@ -5,6 +5,7 @@ cc_library(
         "inc/math/constants.h",
         "inc/math/commutation.h",
         "inc/math/cogging.h",
+        "inc/math/encoder_comp.h",
         "inc/math/foc.h",
     ],
     includes = ["inc"],
