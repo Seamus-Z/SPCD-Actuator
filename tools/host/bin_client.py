@@ -12,11 +12,9 @@ from xt_proto import (
     Info,
     Telemetry,
     cmd_id,
-    pack_dq,
     pack_info,
-    pack_raw,
+    pack_servo,
     pack_stop,
-    pack_vfoc,
     parse_frame,
     tel_id,
 )
@@ -100,9 +98,8 @@ def main():
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--stop", action="store_true")
     p.add_argument("--info", action="store_true")
-    p.add_argument("--dq", nargs=3, type=float, metavar=("ID", "IQ", "W"))
-    p.add_argument("--vfoc", nargs=3, type=float, metavar=("TH", "V", "W"))
-    p.add_argument("--raw", nargs=3, type=int, metavar=("A", "B", "C"))
+    p.add_argument("--servo", nargs=2, type=float, metavar=("OMEGA", "ID"),
+                   help="servo velocity [rad/s] and d-axis reference [A]")
     p.add_argument("--telem", action="store_true")
     p.add_argument("--stream", action="store_true")
     p.add_argument("--hz", type=float, default=10.0)
@@ -122,20 +119,12 @@ def main():
         if args.stop:
             ack, _ = client.send_cmd(pack_stop(client._next_seq()))
             print(f"ACK stop status={ack.status}")
-        if args.dq is not None:
-            id_a, iq_a, w = args.dq
-            ack, _ = client.send_cmd(pack_dq(id_a, iq_a, w, client._next_seq()))
-            print(f"ACK dq status={ack.status}")
-        if args.vfoc is not None:
-            th, v, w = args.vfoc
-            ack, _ = client.send_cmd(pack_vfoc(th, v, w, client._next_seq()))
-            print(f"ACK vfoc status={ack.status}")
-        if args.raw is not None:
-            a, b, c = args.raw
-            ack, _ = client.send_cmd(pack_raw(a, b, c, client._next_seq()))
-            print(f"ACK raw status={ack.status}")
+        if args.servo is not None:
+            omega, id_a = args.servo
+            ack, _ = client.send_cmd(pack_servo(omega, id_a, client._next_seq()))
+            print(f"ACK servo status={ack.status}")
         if args.telem or args.stream or not any(
-            [args.stop, args.dq, args.vfoc, args.raw, args.info]
+            [args.stop, args.servo, args.info]
         ):
             if args.stream:
                 period = 1.0 / args.hz if args.hz > 0 else 0.1

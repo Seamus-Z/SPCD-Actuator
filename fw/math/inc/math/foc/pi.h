@@ -2,7 +2,7 @@
 // error = measured - desired; command = -(kp*error + integral).
 #pragma once
 
-namespace foc_ctrl
+namespace math { namespace foc
 {
 
 inline float Limit(float a, float lo, float hi)
@@ -90,4 +90,5 @@ class SimplePI
   State* const state_;
 };
 
-}  // namespace foc_ctrl
+}  // namespace foc
+}  // namespace math

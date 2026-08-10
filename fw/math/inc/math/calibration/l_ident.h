@@ -8,7 +8,7 @@ extern "C" {
 float sqrtf(float);
 }
 
-namespace calibration
+namespace math { namespace calibration
 {
 
 class LIdentCal
@@ -313,4 +313,5 @@ class LIdentCal
   Result result_{};
 };
 
-}  // namespace calibration
+}  // namespace math { namespace calibration
+}  // namespace math

@@ -4,7 +4,7 @@ cc_library(
     hdrs = ["inc/nvs/encoder_cal_store.h"],
     includes = ["inc"],
     deps = [
-        "//fw/math:math",
+        "//fw/math:base",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],
     copts = [

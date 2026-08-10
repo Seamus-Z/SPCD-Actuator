@@ -30,7 +30,7 @@ from xt_proto import (  # noqa: E402
     CtrlReply,
     cmd_id,
     pack_stop,
-    pack_vel,
+    pack_servo,
     parse_frame,
     tel_id,
 )
@@ -139,7 +139,7 @@ def main() -> int:
             omega = args.amp * math.sin(phase)
             last_cmd = omega
             seq = (seq + 1) & 0xFF
-            send(pack_vel(omega, args.id, seq))
+            send(pack_servo(omega, args.id, seq))
             n_tx += 1
 
             while True:

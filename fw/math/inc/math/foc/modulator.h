@@ -1,20 +1,20 @@
-// Open-loop voltage FOC (moteus kVoltageFoc / "d pwm").
+// Open-loop voltage FOC (moteus kDqModulator / "d pwm").
 // Electrical θ is integrated; Vd=V, Vq=0 → InverseDq → BalancedPwm.
 #pragma once
 
 #include <cstdint>
 
 #include "math/constants.h"
-#include "math/foc.h"
+#include "math/foc/transform.h"
 
 
 extern "C" {
 float sqrtf(float);
 }
-namespace foc_ctrl
+namespace math { namespace foc
 {
 
-class VoltageFoc
+class DqModulator
 {
  public:
   struct Options
@@ -39,7 +39,7 @@ class VoltageFoc
     uint16_t c_milli = 0;
   };
 
-  explicit VoltageFoc(const Options& options) : options_(options) {}
+  explicit DqModulator(const Options& options) : options_(options) {}
 
   void Start(const Command& cmd)
   {
@@ -158,4 +158,5 @@ class VoltageFoc
   float theta_rate_ = 0.0f;
 };
 
-}  // namespace foc_ctrl
+}  // namespace foc
+}  // namespace math

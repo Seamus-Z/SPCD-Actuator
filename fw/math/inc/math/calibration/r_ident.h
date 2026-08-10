@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace calibration
+namespace math { namespace calibration
 {
 
 class RIdentCal
@@ -235,4 +235,5 @@ class RIdentCal
   Result result_{};
 };
 
-}  // namespace calibration
+}  // namespace math { namespace calibration
+}  // namespace math

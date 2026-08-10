@@ -72,12 +72,22 @@ class CalibrationProtocolTest(unittest.TestCase):
         self.assertEqual(result.sign, -1)
         self.assertEqual(result.sample_count, 240)
 
+class ServoCommandProtocolTest(unittest.TestCase):
+    def test_pack_servo_uses_velocity_and_d_axis_current(self):
+        frame = xt_proto.pack_servo(12.345, -0.678, seq=7)
+        self.assertEqual(
+            struct.unpack("<BBBBBii", frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 7,
+             xt_proto.CMD_SERVO, 12_345, -678),
+        )
+
+
 class ControlReplyProtocolTest(unittest.TestCase):
     def test_decode_extended_speed_and_voltage_observability(self):
         frame = struct.pack(
             xt_proto._CTRL_FMT,
             xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CTRL_REPLY, 9,
-            xt_proto.CMD_VEL, 0, 0, 4, 1, 1, 0,
+            xt_proto.CMD_SERVO, 0, 0, 4, 1, 1, 0,
             100, 200, 0, 3000, 700, 188_800, 1000, 12_000,
             48_000, 1234, 500, 200_000, 2_643_200, 6_250,
         )

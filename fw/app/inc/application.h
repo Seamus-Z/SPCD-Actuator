@@ -1,5 +1,5 @@
 // Application: system bring-up, main loop, PWM-rate control, telemetry.
-// Host command parsing lives in binary_commands.h.
+// Host command parsing is an Application adapter implemented in binary_commands.cc.
 #pragma once
 
 #include <cstddef>
@@ -10,20 +10,12 @@
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
 #include "app_state.h"
-#include "binary_commands.h"
 #include "device/drv8353s.h"
-#include "calibration/encoder_phase.h"
-#include "calibration/bemf_ident.h"
-#include "calibration/r_ident.h"
-#include "calibration/l_ident.h"
-#include "calibration/cogging.h"
-#include "math/cogging.h"
-#include "math/encoder_comp.h"
-#include "device/ma600.h"
-#include "foc_ctrl/current_loop.h"
-#include "foc_ctrl/encoder_pll.h"
-#include "foc_ctrl/position_loop.h"
-#include "foc_ctrl/voltage_foc.h"
+#include "math/foc/controller.h"
+#include "math/servo_mode/servo_mode.h"
+#include "math/foc/modulator.h"
+#include "middleware/encoder/encoder_service.h"
+#include "middleware/calibration/calibration_manager.h"
 #include "pool/pool.h"
 #include "snapshot_capture.h"
 #include "telemetry/binary_link.h"
@@ -39,13 +31,16 @@ class Application
 
   [[noreturn]] void Run();
 
+  // Command-side transition into the only externally controllable motor mode.
+  uint8_t StartServo(float velocity_rad_s, float id_ref_A);
+
   State state() const { return state_; }
   ::pool::Pool* pool() const { return pool_; }
   bool pwm_output_on() const { return pwm_output_on_; }
-  const foc_ctrl::VoltageFoc* voltage_foc() const { return voltage_foc_.get(); }
-  const foc_ctrl::CurrentLoop* current_loop() const
+  const math::foc::DqModulator* dq_modulator() const { return dq_modulator_.get(); }
+  const math::foc::FocController* foc() const
   {
-    return current_loop_.get();
+    return foc_.get();
   }
   bool dq_valid() const { return dq_valid_; }
   float id_A() const { return id_A_; }
@@ -56,7 +51,18 @@ class Application
   }
 
  private:
-  friend class BinaryCommands;
+  static uint8_t CommandThunk(void* context, uint8_t cmd, uint8_t seq,
+                              const uint8_t* payload, size_t payload_len);
+  uint8_t HandleCommand(uint8_t cmd, uint8_t seq, const uint8_t* payload,
+                        size_t payload_len);
+  uint8_t HandleStop();
+  uint8_t HandleQuery();
+  uint8_t HandleServo(const uint8_t* payload, size_t payload_len);
+  uint8_t HandleCal(const uint8_t* payload, size_t payload_len);
+  uint8_t HandleInfo(uint8_t seq);
+  uint8_t HandleSnap(uint8_t seq, const uint8_t* payload, size_t payload_len);
+  uint8_t HandleEncComp(const uint8_t* payload, size_t payload_len);
+
 
   bool Init();
   void RunOnce();
@@ -80,27 +86,6 @@ class Application
   telemetry::xt_can::CalTelem BuildCalTelem() const;
   telemetry::xt_can::CtrlReply BuildCtrlReply(uint8_t cmd, uint8_t seq,
                                              uint8_t status) const;
-  void SampleEncoder();
-  void ApplyEncoderCalResult();
-  void RestoreEncoderCalBackup();
-  void PersistEncoderCalResult();
-  void ApplyBemfCalResult();
-  void PersistBemfCalResult();
-  void ApplyRIdentResult();
-  void PersistRIdentResult();
-  void ApplyLIdentResult();
-  void PersistLIdentResult();
-  void ApplyCoggingResult();
-  void PersistCoggingResult();
-  float CoggingComp() const;
-  void SetEncoderCompChunk(uint8_t chunk, const int8_t* data, size_t len);
-  void ClearEncoderComp();
-  bool CommitEncoderComp(float scale_rad, bool persist);
-  void PersistEncoderCompResult();
-  float EncoderCompRad() const;
-  // moteus-style: Finish previous SPI, run PLL, then Start next SPI.
-  void UpdateEncoderPll(float dt_s);
-  float CompensatedMechRad() const;
 
   State state_ = State::INIT;
   ::pool::Pool* pool_ = nullptr;
@@ -110,44 +95,11 @@ class Application
   uint8_t mode_ = telemetry::xt_can::kModeStop;
   float id_A_ = 0.0f;
   float iq_A_ = 0.0f;
-  float enc_theta_mech_rad_ = 0.0f;
-  float enc_theta_elec_rad_ = 0.0f;
-  float enc_counts_rad_ = 0.0f;
-  float cal_last_omega_cmd_ = 0.0f;
-  bool encoder_cal_dirty_ = false;
-  bool encoder_cal_persisted_ = false;
-  device::Ma600::Options encoder_cal_backup_{};
-  bool encoder_cal_backup_valid_ = false;
-  bool bemf_cal_dirty_ = false;
-  bool bemf_cal_persisted_ = false;
-  bool r_cal_dirty_ = false;
-  bool r_cal_persisted_ = false;
-  bool l_cal_dirty_ = false;
-  bool l_cal_persisted_ = false;
-  bool cogging_cal_dirty_ = false;
-  bool cogging_cal_persisted_ = false;
-  calibration::EncoderPhaseCal encoder_cal_{};
-  calibration::BemfIdentCal bemf_cal_{};
-  calibration::RIdentCal r_cal_{};
-  calibration::LIdentCal l_cal_{};
-  calibration::CoggingCal cogging_cal_{};
-  math::CoggingTable cogging_table_{};
-  float cogging_scale_ = 0.0f;
-  bool cogging_valid_ = false;
-  math::EncoderCompTable encoder_comp_table_{};
-  float encoder_comp_scale_ = 0.0f;
-  bool encoder_comp_valid_ = false;
-  bool encoder_comp_dirty_ = false;
-  bool encoder_comp_persisted_ = false;
-  uint8_t encoder_comp_chunk_mask_ = 0;
-  uint8_t last_cal_kind_ = 0;  // kCalSub* of the most recently started cal
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType telem_last_us_ = 0;
   hal::MillisecondTimer::TimerType last_rx_us_ = 0;
   // Last ControlIsrStep timestamp; 0 = use PWM nominal dt next time.
   hal::MillisecondTimer::TimerType last_control_us_ = 0;
-  // True when ma600_->StartSample() is in flight (moteus aux SPI pipeline).
-  bool enc_spi_pending_ = false;
   uint8_t enc_telem_div_ = 0;
   SnapshotCapture snapshot_{};
   uint8_t snap_seq_ = 0;
@@ -158,13 +110,12 @@ class Application
   ::pool::PoolPtr<device::Drv8353s> gate_driver_;
   ::pool::PoolPtr<hal::PhaseCurrentAdc> current_adc_;
   ::pool::PoolPtr<hal::PhasePwm> phase_pwm_;
-  ::pool::PoolPtr<foc_ctrl::VoltageFoc> voltage_foc_;
-  ::pool::PoolPtr<foc_ctrl::CurrentLoop> current_loop_;
-  foc_ctrl::EncoderPll encoder_pll_;
-  ::pool::PoolPtr<foc_ctrl::PositionLoop> position_loop_;
-  ::pool::PoolPtr<device::Ma600> ma600_;
+  ::pool::PoolPtr<math::foc::DqModulator> dq_modulator_;
+  ::pool::PoolPtr<math::foc::FocController> foc_;
+  ::pool::PoolPtr<math::servo_mode::ServoMode> servo_mode_;
+  middleware::encoder::EncoderService encoder_;
+  middleware::calibration::CalibrationManager calibration_;
   ::pool::PoolPtr<telemetry::BinaryLink> binary_link_;
-  BinaryCommands commands_;
 };
 
 }  // namespace app

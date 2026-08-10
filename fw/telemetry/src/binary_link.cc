@@ -147,7 +147,7 @@ bool BinaryLink::HandleFrame(const FDCAN_RxHeaderTypeDef& header,
   {
     status = handler_(context_, cmd, hdr.seq, payload, payload_len);
   }
-  // Stream/query cmds reply with CtrlReply (sent by Application/BinaryCommands).
+  // Stream/query cmds reply with CtrlReply (sent by Application).
   if (!xt_can::UsesCtrlReply(cmd))
   {
     SendAck(cmd, hdr.seq, status);

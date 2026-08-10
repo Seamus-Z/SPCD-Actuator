@@ -5,8 +5,7 @@
 #include "BL_Config.h"
 #include "board_config.h"
 #include "bootloader.h"
-#include "math/foc.h"
-#include "nvs/encoder_cal_store.h"
+#include "math/foc/transform.h"
 #include "stm32g4xx.h"
 
 namespace app
@@ -46,15 +45,80 @@ Application::Application(::pool::Pool* pool)
       gate_driver_(pool, timer_.get(), board::GateDriverOptions()),
       current_adc_(pool, timer_.get(), board::CurrentSenseOptions()),
       phase_pwm_(pool, board::PhasePwmOptions()),
-      voltage_foc_(pool, board::VoltageFocOptions()),
-      current_loop_(pool, board::CurrentLoopOptions()),
-      encoder_pll_(board::EncoderPllOptions()),
-      position_loop_(pool, board::PositionLoopOptions()),
-      ma600_(pool, timer_.get(), board::Ma600Options()),
-      binary_link_(pool, can_.get(), kDefaultCanId),
-      commands_(this)
+      dq_modulator_(pool, board::DqModulatorOptions()),
+      foc_(pool, board::FocControllerOptions()),
+      servo_mode_(pool, board::ServoModeOptions()),
+      encoder_(pool, timer_.get(), board::EncoderOptions()),
+      calibration_(&encoder_, foc_.get(), servo_mode_.get(), phase_pwm_.get()),
+      binary_link_(pool, can_.get(), kDefaultCanId)
 {
-  binary_link_->SetCommandHandler(&BinaryCommands::Thunk, &commands_);
+  binary_link_->SetCommandHandler(&Application::CommandThunk, this);
+}
+
+uint8_t Application::StartServo(float velocity_rad_s, float id_ref_A)
+{
+  if (state_ != State::RUN || phase_pwm_->init_ok() == false)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (!encoder_.valid() ||
+      servo_mode_.get() == nullptr)
+  {
+    return telemetry::xt_can::kStatusFail;
+  }
+
+  const float omega_ref = velocity_rad_s;
+  const float id_ref = id_ref_A;
+  if (mode_ == telemetry::xt_can::kModeServo &&
+      servo_mode_.get() != nullptr && servo_mode_->active() &&
+      foc_.get() != nullptr && foc_->active())
+  {
+    servo_mode_->SetVelocity(omega_ref);
+    servo_mode_->SetIdRef(id_ref);
+    foc_->SetRefs(id_ref, foc_->iq_ref_A());
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                                  encoder_.pll().velocity_mech());
+    return telemetry::xt_can::kStatusOk;
+  }
+
+  dq_modulator_->Stop();
+  phase_pwm_->DisableControlIsr();
+
+  // Servo policy: position=NaN selects velocity control.
+  encoder_.SampleBlocking();
+  encoder_.ResetPll();
+  servo_mode_->Start(math::foc::QuietNan(), omega_ref, id_ref);
+
+  const float theta_elec = encoder_.sample().electrical_rad;
+  math::foc::FocController::Command cmd;
+  cmd.theta_rad = theta_elec;
+  cmd.id_A = id_ref;
+  cmd.iq_A = 0.0f;
+  cmd.theta_rate_rad_s = 0.0f;
+  foc_->Start(cmd);
+  foc_->SetOmega(encoder_.pll().omega_elec(),
+                                encoder_.pll().velocity_mech());
+
+  last_current_ = current_adc_->ReadLatest();
+  math::foc::FocController::Duties duties;
+  if (foc_->Step(0.0f, last_current_.i1_A,
+                                last_current_.i2_A,
+                                last_current_.i3_A, &duties,
+                                &theta_elec) == false)
+  {
+    foc_->Stop();
+    servo_mode_->Stop();
+    return telemetry::xt_can::kStatusFail;
+  }
+  id_A_ = foc_->id_A();
+  iq_A_ = foc_->iq_A();
+  dq_valid_ = last_current_.ok;
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  mode_ = telemetry::xt_can::kModeServo;
+  StartControlIsr();
+  return telemetry::xt_can::kStatusOk;
 }
 
 void Application::Run()
@@ -107,72 +171,9 @@ bool Application::Init()
   }
   phase_pwm_->EnableAdcTrigger();
 
-  // Encoder bring-up is non-fatal; dq commutation requires encoder_ok_.
-  nvs::EncoderCalData cal{};
-  const bool cal_loaded = nvs::EncoderCalStore::Load(&cal);
-
-  encoder_ok_ = (ma600_.get() != nullptr) && ma600_->Init();
-  if (encoder_ok_)
-  {
-    if (cal_loaded)
-    {
-      ma600_->SetSign(cal.sign);
-      ma600_->SetOffsetRad(cal.offset_rad);
-      ma600_->SetCommutationOffsets(cal.commutation_offset_rad,
-                                    cal.commutation_valid);
-      encoder_cal_persisted_ = true;
-    }
-    SampleEncoder();
-    encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
-    enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
-  }
-
-  if (cal_loaded && cal.bemf_valid && cal.bemf_v_per_hz > 0.005f)
-  {
-    if (current_loop_.get() != nullptr)
-    {
-      current_loop_->SetVPerHz(cal.bemf_v_per_hz);
-    }
-    if (position_loop_.get() != nullptr)
-    {
-      position_loop_->SetTorqueConstant(
-          board::IdentifiedTorqueConstantNmPerA(cal.bemf_v_per_hz));
-    }
-    bemf_cal_persisted_ = true;
-  }
-
-  if (cal_loaded && (cal.resistance_valid || cal.inductance_valid) &&
-      current_loop_.get() != nullptr)
-  {
-    const float r = cal.resistance_valid ? cal.resistance_ohm
-                                         : current_loop_->resistance_ohm();
-    const float ld = cal.inductance_valid ? cal.inductance_d_H
-                                          : current_loop_->inductance_d_H();
-    const float lq = cal.inductance_valid ? cal.inductance_q_H
-                                          : current_loop_->inductance_q_H();
-    if (r > 0.001f && ld > 0.0f && lq > 0.0f)
-    {
-      current_loop_->SetResistanceInductance(r, ld, lq);
-    }
-    r_cal_persisted_ = cal.resistance_valid;
-    l_cal_persisted_ = cal.inductance_valid;
-  }
-
-  if (cal_loaded && cal.cogging_valid)
-  {
-    cogging_table_ = cal.cogging_table;
-    cogging_scale_ = cal.cogging_scale;
-    cogging_valid_ = true;
-    cogging_cal_persisted_ = true;
-  }
-  if (cal_loaded && cal.encoder_comp_valid)
-  {
-    encoder_comp_table_ = cal.encoder_comp_table;
-    encoder_comp_scale_ = cal.encoder_comp_scale;
-    encoder_comp_valid_ = true;
-    encoder_comp_persisted_ = true;
-    encoder_comp_chunk_mask_ = 0xFFu;
-  }
+  // Sensor faults are non-fatal at boot; closed-loop modes require encoder_.valid().
+  (void)encoder_.Init();
+  (void)calibration_.LoadPersistentConfig();
 
   telem_last_us_ = timer_->read_us();
   LedOn();
@@ -190,36 +191,7 @@ void Application::RunOnce()
     return;
   }
 
-  if (encoder_cal_dirty_)
-  {
-    PersistEncoderCalResult();
-    encoder_cal_dirty_ = false;
-  }
-  if (bemf_cal_dirty_)
-  {
-    PersistBemfCalResult();
-    bemf_cal_dirty_ = false;
-  }
-  if (r_cal_dirty_)
-  {
-    PersistRIdentResult();
-    r_cal_dirty_ = false;
-  }
-  if (l_cal_dirty_)
-  {
-    PersistLIdentResult();
-    l_cal_dirty_ = false;
-  }
-  if (cogging_cal_dirty_)
-  {
-    PersistCoggingResult();
-    cogging_cal_dirty_ = false;
-  }
-  if (encoder_comp_dirty_)
-  {
-    PersistEncoderCompResult();
-    encoder_comp_dirty_ = false;
-  }
+  calibration_.PersistPending();
 
   PollCan();
   MaybeCommandTimeout();
@@ -267,37 +239,18 @@ void Application::StopOutput()
     snap_meta_sent_ = false;
   }
   last_control_us_ = 0;
-  if (encoder_cal_.active())
+  calibration_.Abort();
+  if (dq_modulator_.get() != nullptr)
   {
-    encoder_cal_.Stop();
+    dq_modulator_->Stop();
   }
-  if (bemf_cal_.active())
+  if (servo_mode_.get() != nullptr)
   {
-    bemf_cal_.Stop();
+    servo_mode_->Stop();
   }
-  if (r_cal_.active())
+  if (foc_.get() != nullptr)
   {
-    r_cal_.Stop();
-  }
-  if (l_cal_.active())
-  {
-    l_cal_.Stop();
-  }
-  if (cogging_cal_.active())
-  {
-    cogging_cal_.Stop();
-  }
-  if (voltage_foc_.get() != nullptr)
-  {
-    voltage_foc_->Stop();
-  }
-  if (position_loop_.get() != nullptr)
-  {
-    position_loop_->Stop();
-  }
-  if (current_loop_.get() != nullptr)
-  {
-    current_loop_->Stop();
+    foc_->Stop();
   }
   if (phase_pwm_.get() != nullptr)
   {
@@ -319,8 +272,7 @@ void Application::StartControlIsr()
     return;
   }
   last_control_us_ = 0;
-  enc_spi_pending_ = false;
-  phase_pwm_->EnableControlIsr(&Application::ControlIsrThunk, this);
+    phase_pwm_->EnableControlIsr(&Application::ControlIsrThunk, this);
 }
 
 void Application::ControlIsrThunk(void* context)
@@ -349,28 +301,21 @@ void Application::ObserveDqFromSample(float theta_rad,
 
 void Application::ControlIsrStep()
 {
-  const bool cal_on = encoder_cal_.active();
-  const bool bemf_on = bemf_cal_.active();
-  const bool r_on = r_cal_.active();
-  const bool l_on = l_cal_.active();
-  const bool cogging_on = cogging_cal_.active();
+  const bool cal_on = calibration_.encoder_phase().active();
+  const bool bemf_on = calibration_.bemf().active();
+  const bool r_on = calibration_.resistance().active();
+  const bool l_on = calibration_.inductance().active();
+  const bool cogging_on = calibration_.cogging().active();
   const bool vel_on =
-      position_loop_.get() != nullptr && position_loop_->active() &&
+      servo_mode_.get() != nullptr && servo_mode_->active() &&
       !bemf_on && !cogging_on;
-  const bool vfoc_on =
-      voltage_foc_.get() != nullptr && voltage_foc_->active() && !cal_on &&
-      !l_on;
-  const bool dq_on = current_loop_.get() != nullptr && current_loop_->active() &&
-                     !vel_on && !cal_on && !bemf_on &&
-                     mode_ == telemetry::xt_can::kModeDq;
   if (phase_pwm_.get() == nullptr || current_adc_.get() == nullptr)
   {
     return;
   }
 
   const bool control_active =
-      vfoc_on || dq_on || vel_on || cal_on || bemf_on || r_on || l_on ||
-      cogging_on;
+      vel_on || cal_on || bemf_on || r_on || l_on || cogging_on;
 
   // Prefer measured ISR period. Nominal period_s() can disagree with real UEV
   // spacing; that scales PLL ω and makes vel PID think it is already tracking.
@@ -400,13 +345,13 @@ void Application::ControlIsrStep()
     {
       const auto sample = current_adc_->ReadLatest();
       last_current_ = sample;
-      if (encoder_ok_)
+      if (encoder_.valid())
       {
-        UpdateEncoderPll(dt_s);
+        encoder_.UpdatePwmIsr(dt_s);
       }
       const uint32_t dt_us = static_cast<uint32_t>(dt_s * 1.0e6f + 0.5f);
       snapshot_.PushIsr(id_A_, iq_A_, sample.i1_A, sample.i2_A, sample.i3_A,
-                        enc_theta_mech_rad_, enc_theta_elec_rad_, dt_us);
+                        encoder_.sample().mechanical_rad, encoder_.sample().electrical_rad, dt_us);
     }
     else if (phase_pwm_->control_isr_on())
     {
@@ -419,46 +364,41 @@ void Application::ControlIsrStep()
   const auto sample = current_adc_->ReadLatest();
   last_current_ = sample;
 
-  if (encoder_ok_ || cal_on)
+  if (encoder_.valid() || cal_on)
   {
-    UpdateEncoderPll(dt_s);
+    encoder_.UpdatePwmIsr(dt_s);
   }
 
   if (cal_on)
   {
-    const float omega = encoder_cal_.omega_cmd_elec();
-    if (omega != cal_last_omega_cmd_)
-    {
-      current_loop_->SetThetaRate(omega);
-      cal_last_omega_cmd_ = omega;
-    }
-    current_loop_->SetRefs(encoder_cal_.current_A(), 0.0f);
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+    foc_->SetThetaRate(calibration_.encoder_phase().omega_cmd_elec());
+    foc_->SetRefs(calibration_.encoder_phase().current_A(), 0.0f);
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties))
     {
       return;
     }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
     dq_valid_ = sample.ok;
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
 
-    const bool finished = encoder_cal_.Step(
-        dt_s, current_loop_->theta_rad(), enc_counts_rad_);
+    const bool finished = calibration_.encoder_phase().Step(
+        dt_s, foc_->theta_rad(), encoder_.sample().counts_rad);
     if (finished)
     {
-      if (encoder_cal_.state() == calibration::EncoderPhaseCal::State::Done)
+      if (calibration_.encoder_phase().state() == math::calibration::EncoderPhaseCal::State::Done)
       {
-        ApplyEncoderCalResult();
+        calibration_.ApplyEncoderResult();
       }
       else
       {
-        RestoreEncoderCalBackup();
+        encoder_.RestoreCalibration();
       }
-      current_loop_->Stop();
+      foc_->Stop();
       gate_driver_->PowerOff();
       pwm_output_on_ = false;
       mode_ = telemetry::xt_can::kModeStop;
@@ -470,11 +410,11 @@ void Application::ControlIsrStep()
   else if (bemf_on)
   {
     // Ke identification: closed-loop velocity sweep, Id=0, regress Vq/Iq.
-    if (!encoder_ok_ || !encoder_pll_.theta_valid())
+    if (!encoder_.valid() || !encoder_.pll().theta_valid())
     {
-      bemf_cal_.Stop();
-      position_loop_->Stop();
-      current_loop_->Stop();
+      calibration_.bemf().Stop();
+      servo_mode_->Stop();
+      foc_->Stop();
       if (gate_driver_.get() != nullptr)
       {
         gate_driver_->PowerOff();
@@ -484,46 +424,46 @@ void Application::ControlIsrStep()
       mode_ = telemetry::xt_can::kModeStop;
       return;
     }
-    position_loop_->SetVelocity(bemf_cal_.velocity_cmd_mech_rad_s());
-    position_loop_->SetIdRef(0.0f);
-    const float iq = position_loop_->Step(
-        dt_s, encoder_pll_.position_rad(), encoder_pll_.velocity_mech());
-    if (position_loop_->faulted())
+    servo_mode_->SetVelocity(calibration_.bemf().velocity_cmd_mech_rad_s());
+    servo_mode_->SetIdRef(0.0f);
+    const float iq = servo_mode_->Step(
+        dt_s, encoder_.pll().position_rad(), encoder_.pll().velocity_mech());
+    if (servo_mode_->faulted())
     {
-      bemf_cal_.Stop();
+      calibration_.bemf().Stop();
       StopOutput();
       return;
     }
-    current_loop_->SetRefs(position_loop_->id_ref_A(), iq);
+    foc_->SetRefs(servo_mode_->id_ref_A(), iq);
     // Use measured speed for BEMF/phase-lead (same as dq). Command-speed FF
     // over-leads the lagging direction and turns a small encoder-cal bias into
     // a hard one-sided speed ceiling that flips after recalibration.
-    const float w_meas = encoder_pll_.velocity_mech();
-    current_loop_->SetOmega(encoder_pll_.omega_elec(), w_meas);
-    const float theta_elec = encoder_pll_.electrical_theta();
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+    const float w_meas = encoder_.pll().velocity_mech();
+    foc_->SetOmega(encoder_.pll().omega_elec(), w_meas);
+    const float theta_elec = encoder_.pll().electrical_theta();
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties, &theta_elec))
     {
       return;
     }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
     dq_valid_ = sample.ok;
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
 
-    const bool finished = bemf_cal_.Step(dt_s, w_meas, current_loop_->vq_V(),
-                                         current_loop_->iq_A());
+    const bool finished = calibration_.bemf().Step(dt_s, w_meas, foc_->vq_V(),
+                                         foc_->iq_A());
     if (finished)
     {
-      if (bemf_cal_.state() == calibration::BemfIdentCal::State::Done)
+      if (calibration_.bemf().state() == math::calibration::BemfIdentCal::State::Done)
       {
-        ApplyBemfCalResult();
+        calibration_.ApplyBemfResult();
       }
-      position_loop_->Stop();
-      current_loop_->Stop();
+      servo_mode_->Stop();
+      foc_->Stop();
       gate_driver_->PowerOff();
       pwm_output_on_ = false;
       mode_ = telemetry::xt_can::kModeStop;
@@ -534,28 +474,28 @@ void Application::ControlIsrStep()
   }
   else if (r_on)
   {
-    current_loop_->SetRefs(r_cal_.id_cmd_A(), 0.0f);
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+    foc_->SetRefs(calibration_.resistance().id_cmd_A(), 0.0f);
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties, nullptr))
     {
       return;
     }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
     dq_valid_ = sample.ok;
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
 
-    const bool finished = r_cal_.Step(dt_s, id_A_, current_loop_->vd_V());
+    const bool finished = calibration_.resistance().Step(dt_s, id_A_, foc_->vd_V());
     if (finished)
     {
-      if (r_cal_.state() == calibration::RIdentCal::State::Done)
+      if (calibration_.resistance().state() == math::calibration::RIdentCal::State::Done)
       {
-        ApplyRIdentResult();
+        calibration_.ApplyResistanceResult();
       }
-      current_loop_->Stop();
+      foc_->Stop();
       gate_driver_->PowerOff();
       pwm_output_on_ = false;
       mode_ = telemetry::xt_can::kModeStop;
@@ -566,26 +506,26 @@ void Application::ControlIsrStep()
   }
   else if (l_on)
   {
-    voltage_foc_->SetDqVoltage(l_cal_.voltage_d_cmd_V(),
-                               l_cal_.voltage_q_cmd_V());
-    foc_ctrl::VoltageFoc::Duties duties;
-    if (!voltage_foc_->Step(dt_s, &duties))
+    dq_modulator_->SetDqVoltage(calibration_.inductance().voltage_d_cmd_V(),
+                               calibration_.inductance().voltage_q_cmd_V());
+    math::foc::DqModulator::Duties duties;
+    if (!dq_modulator_->Step(dt_s, &duties))
     {
       return;
     }
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
-    ObserveDqFromSample(voltage_foc_->theta_rad(), sample);
+    ObserveDqFromSample(dq_modulator_->theta_rad(), sample);
 
-    const bool finished = l_cal_.Step(dt_s, id_A_, iq_A_);
+    const bool finished = calibration_.inductance().Step(dt_s, id_A_, iq_A_);
     if (finished)
     {
-      if (l_cal_.state() == calibration::LIdentCal::State::Done)
+      if (calibration_.inductance().state() == math::calibration::LIdentCal::State::Done)
       {
-        ApplyLIdentResult();
+        calibration_.ApplyInductanceResult();
       }
-      voltage_foc_->Stop();
+      dq_modulator_->Stop();
       gate_driver_->PowerOff();
       pwm_output_on_ = false;
       mode_ = telemetry::xt_can::kModeStop;
@@ -599,11 +539,11 @@ void Application::ControlIsrStep()
     // Cogging map: run the velocity loop at a slow constant speed (fwd then
     // rev), record the torque current per rotor position. No cogging FF is
     // injected here — we are measuring the raw ripple.
-    if (!encoder_ok_ || !encoder_pll_.theta_valid())
+    if (!encoder_.valid() || !encoder_.pll().theta_valid())
     {
-      cogging_cal_.Stop();
-      position_loop_->Stop();
-      current_loop_->Stop();
+      calibration_.cogging().Stop();
+      servo_mode_->Stop();
+      foc_->Stop();
       if (gate_driver_.get() != nullptr)
       {
         gate_driver_->PowerOff();
@@ -613,42 +553,42 @@ void Application::ControlIsrStep()
       mode_ = telemetry::xt_can::kModeStop;
       return;
     }
-    position_loop_->SetVelocity(cogging_cal_.velocity_cmd_mech_rad_s());
-    position_loop_->SetIdRef(0.0f);
-    const float iq = position_loop_->Step(
-        dt_s, encoder_pll_.position_rad(), encoder_pll_.velocity_mech());
-    if (position_loop_->faulted())
+    servo_mode_->SetVelocity(calibration_.cogging().velocity_cmd_mech_rad_s());
+    servo_mode_->SetIdRef(0.0f);
+    const float iq = servo_mode_->Step(
+        dt_s, encoder_.pll().position_rad(), encoder_.pll().velocity_mech());
+    if (servo_mode_->faulted())
     {
-      cogging_cal_.Stop();
+      calibration_.cogging().Stop();
       StopOutput();
       return;
     }
-    current_loop_->SetRefs(position_loop_->id_ref_A(), iq);
-    current_loop_->SetOmega(encoder_pll_.omega_elec(),
-                            encoder_pll_.velocity_mech());
-    const float theta_elec = encoder_pll_.electrical_theta();
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+    foc_->SetRefs(servo_mode_->id_ref_A(), iq);
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                            encoder_.pll().velocity_mech());
+    const float theta_elec = encoder_.pll().electrical_theta();
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties, &theta_elec))
     {
       return;
     }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
     dq_valid_ = sample.ok;
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
 
-    const bool finished = cogging_cal_.Step(dt_s, enc_theta_mech_rad_, iq);
+    const bool finished = calibration_.cogging().Step(dt_s, encoder_.sample().mechanical_rad, iq);
     if (finished)
     {
-      if (cogging_cal_.state() == calibration::CoggingCal::State::Done)
+      if (calibration_.cogging().state() == math::calibration::CoggingCal::State::Done)
       {
-        ApplyCoggingResult();
+        calibration_.ApplyCoggingResult();
       }
-      position_loop_->Stop();
-      current_loop_->Stop();
+      servo_mode_->Stop();
+      foc_->Stop();
       gate_driver_->PowerOff();
       pwm_output_on_ = false;
       mode_ = telemetry::xt_can::kModeStop;
@@ -660,10 +600,10 @@ void Application::ControlIsrStep()
   else if (vel_on)
   {
     // moteus velocity mode: PID(position=NaN, ω) → Iq, encoder θ_e commutation.
-    if (!encoder_ok_ || !encoder_pll_.theta_valid())
+    if (!encoder_.valid() || !encoder_.pll().theta_valid())
     {
-      position_loop_->Stop();
-      current_loop_->Stop();
+      servo_mode_->Stop();
+      foc_->Stop();
       if (gate_driver_.get() != nullptr)
       {
         gate_driver_->PowerOff();
@@ -673,78 +613,37 @@ void Application::ControlIsrStep()
       mode_ = telemetry::xt_can::kModeStop;
       return;
     }
-    const float iq = position_loop_->Step(
-        dt_s, encoder_pll_.position_rad(), encoder_pll_.velocity_mech());
-    if (position_loop_->faulted())
+    const float iq = servo_mode_->Step(
+        dt_s, encoder_.pll().position_rad(), encoder_.pll().velocity_mech());
+    if (servo_mode_->faulted())
     {
       StopOutput();
       return;
     }
-    current_loop_->SetRefs(position_loop_->id_ref_A(), iq + CoggingComp());
+    foc_->SetRefs(servo_mode_->id_ref_A(), iq + encoder_.CoggingCurrentCompensation());
     // Measured ω for FF/lead. Using control_velocity here made a static
     // encoder-cal phase bias choose which direction could reach high speed.
-    current_loop_->SetOmega(encoder_pll_.omega_elec(),
-                            encoder_pll_.velocity_mech());
-    const float theta_elec = encoder_pll_.electrical_theta();
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                            encoder_.pll().velocity_mech());
+    const float theta_elec = encoder_.pll().electrical_theta();
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
                              &duties, &theta_elec))
     {
       return;
     }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
     dq_valid_ = sample.ok;
     phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
   }
-  else if (dq_on)
-  {
-    foc_ctrl::CurrentLoop::Duties duties;
-    if (encoder_ok_ && encoder_pll_.theta_valid())
-    {
-      current_loop_->SetOmega(encoder_pll_.omega_elec(),
-                              encoder_pll_.velocity_mech());
-      const float theta_elec = encoder_pll_.electrical_theta();
-      if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
-                               &duties, &theta_elec))
-      {
-        return;
-      }
-    }
-    else
-    {
-      // Fallback: open-loop θ integration (pre-encoder bring-up).
-      if (!current_loop_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
-                               &duties, nullptr))
-      {
-        return;
-      }
-    }
-    id_A_ = current_loop_->id_A();
-    iq_A_ = current_loop_->iq_A();
-    dq_valid_ = sample.ok;
-    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
-    gate_driver_->PowerOn();
-    pwm_output_on_ = true;
-  }
-  else
-  {
-    foc_ctrl::VoltageFoc::Duties duties;
-    if (!voltage_foc_->Step(dt_s, &duties))
-    {
-      return;
-    }
-    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
-    gate_driver_->PowerOn();
-    pwm_output_on_ = true;
-    ObserveDqFromSample(voltage_foc_->theta_rad(), sample);
-  }
+
 
   const uint32_t dt_us = static_cast<uint32_t>(dt_s * 1.0e6f + 0.5f);
   snapshot_.PushIsr(id_A_, iq_A_, sample.i1_A, sample.i2_A, sample.i3_A,
-                    enc_theta_mech_rad_, enc_theta_elec_rad_, dt_us);
+                    encoder_.sample().mechanical_rad, encoder_.sample().electrical_rad, dt_us);
 }
 
 void Application::PollCan()
@@ -805,13 +704,12 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagFault);
   }
-  if (encoder_ok_)
+  if (encoder_.valid())
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncOk);
   }
-  if (encoder_ok_ && encoder_pll_.theta_valid() &&
-      (mode_ == telemetry::xt_can::kModeDq ||
-       mode_ == telemetry::xt_can::kModeVel))
+  if (encoder_.valid() && encoder_.pll().theta_valid() &&
+      (mode_ == telemetry::xt_can::kModeServo))
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncMode);
   }
@@ -822,37 +720,37 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
   t.i2_mA = AmpsToMilli(last_current_.i2_A);
   t.i3_mA = AmpsToMilli(last_current_.i3_A);
 
-  if (current_loop_.get() != nullptr && current_loop_->active())
+  if (foc_.get() != nullptr && foc_->active())
   {
-    t.idref_mA = AmpsToMilli(current_loop_->id_ref_A());
-    t.iqref_mA = AmpsToMilli(current_loop_->iq_ref_A());
-    if (encoder_ok_ && encoder_pll_.theta_valid())
+    t.idref_mA = AmpsToMilli(foc_->id_ref_A());
+    t.iqref_mA = AmpsToMilli(foc_->iq_ref_A());
+    if (encoder_.valid() && encoder_.pll().theta_valid())
     {
       t.theta_mrad =
-          static_cast<int32_t>(encoder_pll_.electrical_theta() * 1000.0f);
+          static_cast<int32_t>(encoder_.pll().electrical_theta() * 1000.0f);
       t.omega_mrad_s =
-          static_cast<int32_t>(encoder_pll_.velocity_mech() * 1000.0f);
+          static_cast<int32_t>(encoder_.pll().velocity_mech() * 1000.0f);
     }
     else
     {
-      t.theta_mrad = static_cast<int32_t>(current_loop_->theta_rad() * 1000.0f);
+      t.theta_mrad = static_cast<int32_t>(foc_->theta_rad() * 1000.0f);
       t.omega_mrad_s = static_cast<int32_t>(
-          current_loop_->theta_rate_rad_s() /
+          foc_->theta_rate_rad_s() /
           board::MotorParams().pole_pairs * 1000.0f);
     }
-    t.vd_mV = static_cast<int32_t>(current_loop_->vd_V() * 1000.0f);
-    t.vq_mV = static_cast<int32_t>(current_loop_->vq_V() * 1000.0f);
-    t.bus_mV = static_cast<uint16_t>(current_loop_->bus_V() * 1000.0f + 0.5f);
+    t.vd_mV = static_cast<int32_t>(foc_->vd_V() * 1000.0f);
+    t.vq_mV = static_cast<int32_t>(foc_->vq_V() * 1000.0f);
+    t.bus_mV = static_cast<uint16_t>(foc_->bus_V() * 1000.0f + 0.5f);
   }
-  else if (voltage_foc_.get() != nullptr && voltage_foc_->active())
+  else if (dq_modulator_.get() != nullptr && dq_modulator_->active())
   {
-    t.theta_mrad = static_cast<int32_t>(voltage_foc_->theta_rad() * 1000.0f);
+    t.theta_mrad = static_cast<int32_t>(dq_modulator_->theta_rad() * 1000.0f);
     t.omega_mrad_s = static_cast<int32_t>(
-        voltage_foc_->theta_rate_rad_s() /
+        dq_modulator_->theta_rate_rad_s() /
         board::MotorParams().pole_pairs * 1000.0f);
-    t.vd_mV = static_cast<int32_t>(voltage_foc_->voltage_V() * 1000.0f);
+    t.vd_mV = static_cast<int32_t>(dq_modulator_->voltage_V() * 1000.0f);
     t.vq_mV = 0;
-    t.bus_mV = static_cast<uint16_t>(voltage_foc_->bus_V() * 1000.0f + 0.5f);
+    t.bus_mV = static_cast<uint16_t>(dq_modulator_->bus_V() * 1000.0f + 0.5f);
   }
   else
   {
@@ -907,14 +805,14 @@ void Application::ReplyCtrl(uint8_t cmd, uint8_t seq, uint8_t status)
   }
   if (phase_pwm_.get() == nullptr || !phase_pwm_->control_isr_on())
   {
-    SampleEncoder();
+    encoder_.SampleBlocking();
   }
   binary_link_->SendCtrlReply(BuildCtrlReply(cmd, seq, status));
-  if (encoder_cal_.state() != calibration::EncoderPhaseCal::State::Idle ||
-      bemf_cal_.state() != calibration::BemfIdentCal::State::Idle ||
-      r_cal_.state() != calibration::RIdentCal::State::Idle ||
-      l_cal_.state() != calibration::LIdentCal::State::Idle ||
-      cogging_cal_.state() != calibration::CoggingCal::State::Idle)
+  if (calibration_.encoder_phase().state() != math::calibration::EncoderPhaseCal::State::Idle ||
+      calibration_.bemf().state() != math::calibration::BemfIdentCal::State::Idle ||
+      calibration_.resistance().state() != math::calibration::RIdentCal::State::Idle ||
+      calibration_.inductance().state() != math::calibration::LIdentCal::State::Idle ||
+      calibration_.cogging().state() != math::calibration::CoggingCal::State::Idle)
   {
     binary_link_->SendCalTelem(BuildCalTelem());
   }
@@ -928,34 +826,34 @@ void Application::MaybeSendTelemetry()
 
 telemetry::xt_can::CalTelem Application::BuildCalTelem() const
 {
-  if (last_cal_kind_ == telemetry::xt_can::kCalSubBemf)
+  if (calibration_.last_kind() == telemetry::xt_can::kCalSubBemf)
   {
     telemetry::xt_can::CalTelem c{};
     c.kind = telemetry::xt_can::kCalSubBemf;
-    switch (bemf_cal_.state())
+    switch (calibration_.bemf().state())
     {
-      case calibration::BemfIdentCal::State::Running:
+      case math::calibration::BemfIdentCal::State::Running:
         c.state = telemetry::xt_can::kCalStateBemfRun;
         break;
-      case calibration::BemfIdentCal::State::Done:
+      case math::calibration::BemfIdentCal::State::Done:
         c.state = telemetry::xt_can::kCalStateDone;
         break;
-      case calibration::BemfIdentCal::State::Failed:
+      case math::calibration::BemfIdentCal::State::Failed:
         c.state = telemetry::xt_can::kCalStateFailed;
         break;
       default:
         c.state = telemetry::xt_can::kCalStateIdle;
         break;
     }
-    c.progress_pm = bemf_cal_.progress_permille();
-    const auto& br = bemf_cal_.result();
+    c.progress_pm = calibration_.bemf().progress_permille();
+    const auto& br = calibration_.bemf().result();
     c.offset_mrad = static_cast<int32_t>(br.ke_v_s_per_rad * 1.0e6f);
     c.residual_mrad = static_cast<int32_t>(br.r2 * 1.0e6f);
     c.sign = 0;
     c.ok = br.ok ? 1 : 0;
     {
       uint16_t samples = br.points_used;
-      if (bemf_cal_persisted_ && samples < 0x8000)
+      if (calibration_.bemf_persisted() && samples < 0x8000)
       {
         samples = static_cast<uint16_t>(samples | 0x8000u);
       }
@@ -963,34 +861,34 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
     }
     return c;
   }
-  if (last_cal_kind_ == telemetry::xt_can::kCalSubResistance)
+  if (calibration_.last_kind() == telemetry::xt_can::kCalSubResistance)
   {
     telemetry::xt_can::CalTelem c{};
     c.kind = telemetry::xt_can::kCalSubResistance;
-    switch (r_cal_.state())
+    switch (calibration_.resistance().state())
     {
-      case calibration::RIdentCal::State::Running:
+      case math::calibration::RIdentCal::State::Running:
         c.state = telemetry::xt_can::kCalStateRRun;
         break;
-      case calibration::RIdentCal::State::Done:
+      case math::calibration::RIdentCal::State::Done:
         c.state = telemetry::xt_can::kCalStateDone;
         break;
-      case calibration::RIdentCal::State::Failed:
+      case math::calibration::RIdentCal::State::Failed:
         c.state = telemetry::xt_can::kCalStateFailed;
         break;
       default:
         c.state = telemetry::xt_can::kCalStateIdle;
         break;
     }
-    c.progress_pm = r_cal_.progress_permille();
-    const auto& rr = r_cal_.result();
+    c.progress_pm = calibration_.resistance().progress_permille();
+    const auto& rr = calibration_.resistance().result();
     c.offset_mrad = static_cast<int32_t>(rr.resistance_ohm * 1.0e6f);
     c.residual_mrad = static_cast<int32_t>(rr.r2 * 1.0e6f);
     c.sign = 0;
     c.ok = rr.ok ? 1 : 0;
     {
       uint16_t samples = rr.points_used;
-      if (r_cal_persisted_ && samples < 0x8000)
+      if (calibration_.resistance_persisted() && samples < 0x8000)
       {
         samples = static_cast<uint16_t>(samples | 0x8000u);
       }
@@ -998,27 +896,27 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
     }
     return c;
   }
-  if (last_cal_kind_ == telemetry::xt_can::kCalSubInductance)
+  if (calibration_.last_kind() == telemetry::xt_can::kCalSubInductance)
   {
     telemetry::xt_can::CalTelem c{};
     c.kind = telemetry::xt_can::kCalSubInductance;
-    switch (l_cal_.state())
+    switch (calibration_.inductance().state())
     {
-      case calibration::LIdentCal::State::Running:
+      case math::calibration::LIdentCal::State::Running:
         c.state = telemetry::xt_can::kCalStateLRun;
         break;
-      case calibration::LIdentCal::State::Done:
+      case math::calibration::LIdentCal::State::Done:
         c.state = telemetry::xt_can::kCalStateDone;
         break;
-      case calibration::LIdentCal::State::Failed:
+      case math::calibration::LIdentCal::State::Failed:
         c.state = telemetry::xt_can::kCalStateFailed;
         break;
       default:
         c.state = telemetry::xt_can::kCalStateIdle;
         break;
     }
-    c.progress_pm = l_cal_.progress_permille();
-    const auto& lr = l_cal_.result();
+    c.progress_pm = calibration_.inductance().progress_permille();
+    const auto& lr = calibration_.inductance().result();
     c.offset_mrad = static_cast<int32_t>(lr.inductance_d_H * 1.0e9f);
     c.residual_mrad = static_cast<int32_t>(lr.inductance_q_H * 1.0e9f);
     c.sign = 0;
@@ -1026,7 +924,7 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
     {
       uint16_t samples =
           static_cast<uint16_t>(lr.trials_d_used + lr.trials_q_used);
-      if (l_cal_persisted_ && samples < 0x8000)
+      if (calibration_.inductance_persisted() && samples < 0x8000)
       {
         samples = static_cast<uint16_t>(samples | 0x8000u);
       }
@@ -1034,51 +932,51 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
     }
     return c;
   }
-  if (last_cal_kind_ == telemetry::xt_can::kCalSubCogging)
+  if (calibration_.last_kind() == telemetry::xt_can::kCalSubCogging)
   {
     telemetry::xt_can::CalTelem c{};
     c.kind = telemetry::xt_can::kCalSubCogging;
-    switch (cogging_cal_.state())
+    switch (calibration_.cogging().state())
     {
-      case calibration::CoggingCal::State::Running:
+      case math::calibration::CoggingCal::State::Running:
         c.state = telemetry::xt_can::kCalStateCoggingRun;
         break;
-      case calibration::CoggingCal::State::Done:
+      case math::calibration::CoggingCal::State::Done:
         c.state = telemetry::xt_can::kCalStateDone;
         break;
-      case calibration::CoggingCal::State::Failed:
+      case math::calibration::CoggingCal::State::Failed:
         c.state = telemetry::xt_can::kCalStateFailed;
         break;
       default:
         c.state = telemetry::xt_can::kCalStateIdle;
         break;
     }
-    c.progress_pm = cogging_cal_.progress_permille();
-    const auto& cr = cogging_cal_.result();
+    c.progress_pm = calibration_.cogging().progress_permille();
+    const auto& cr = calibration_.cogging().result();
     c.offset_mrad = static_cast<int32_t>(cr.scale * 1.0e6f);
     c.residual_mrad = static_cast<int32_t>(cr.peak_A * 1.0e6f);
     c.sign = 0;
     c.ok = cr.ok ? 1 : 0;
     {
-      uint16_t samples = cogging_cal_persisted_ ? 0x8001u : 1u;
+      uint16_t samples = calibration_.cogging_persisted() ? 0x8001u : 1u;
       c.samples = samples;
     }
     return c;
   }
   telemetry::xt_can::CalTelem c{};
   c.kind = static_cast<uint8_t>(
-      encoder_cal_.method() == calibration::EncoderPhaseCal::Method::Lock
+      calibration_.encoder_phase().method() == math::calibration::EncoderPhaseCal::Method::Lock
           ? telemetry::xt_can::kCalSubEncLock
           : telemetry::xt_can::kCalSubEncPhase);
-  c.state = static_cast<uint8_t>(encoder_cal_.state());
-  c.progress_pm = encoder_cal_.progress_permille();
-  const auto& r = encoder_cal_.result();
+  c.state = static_cast<uint8_t>(calibration_.encoder_phase().state());
+  c.progress_pm = calibration_.encoder_phase().progress_permille();
+  const auto& r = calibration_.encoder_phase().result();
   c.offset_mrad = static_cast<int32_t>(r.offset_rad * 1000.0f);
   c.residual_mrad = static_cast<int32_t>(r.residual_rad_rms * 1000.0f);
   c.sign = (r.sign >= 0.0f) ? 1 : -1;
   c.ok = r.ok ? 1 : 0;
   uint16_t samples = r.samples;
-  if (encoder_cal_persisted_ && samples < 0x8000)
+  if (calibration_.encoder_persisted() && samples < 0x8000)
   {
     samples = static_cast<uint16_t>(samples | 0x8000u);
   }
@@ -1086,359 +984,6 @@ telemetry::xt_can::CalTelem Application::BuildCalTelem() const
   return c;
 }
 
-
-float Application::CompensatedMechRad() const
-{
-  // moteus order: raw(+sign/offset) -> encoder geometric compensation ->
-  // electrical commutation table (folded into mech) -> PLL.
-  const float pp = board::MotorParams().pole_pairs;
-  const float enc_corr = EncoderCompRad();
-  const float corr_m =
-      (pp > 1.0e-6f) ? (ma600_->commutation_offset_rad() / pp) : 0.0f;
-  return math::WrapZeroToTwoPi(enc_theta_mech_rad_ + enc_corr + corr_m);
-}
-
-void Application::SampleEncoder()
-{
-  if (ma600_.get() == nullptr)
-  {
-    return;
-  }
-  // Non-ISR path: blocking sample is fine.
-  enc_spi_pending_ = false;
-  (void)ma600_->Sample();
-  enc_counts_rad_ = ma600_->angle_counts_rad();
-  enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  if (encoder_pll_.theta_valid())
-  {
-    enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
-  }
-  else
-  {
-    // Same formula as PLL output: compensated_mech * pp.
-    enc_theta_elec_rad_ = math::WrapZeroToTwoPi(
-        CompensatedMechRad() * board::MotorParams().pole_pairs);
-  }
-}
-
-void Application::UpdateEncoderPll(float dt_s)
-{
-  if (ma600_.get() == nullptr)
-  {
-    return;
-  }
-  // moteus aux_port: StartSample early / FinishSample later. Across control
-  // cycles we Finish the previous Start, then Start the next transfer so SPI
-  // overlaps the rest of the ISR (and the following ADC conversion window).
-  if (enc_spi_pending_)
-  {
-    (void)ma600_->FinishSample();
-    enc_spi_pending_ = false;
-  }
-  else
-  {
-    (void)ma600_->Sample();
-  }
-  enc_counts_rad_ = ma600_->angle_counts_rad();
-  enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  const float compensated = CompensatedMechRad();
-  // Commutation already folded into compensated mech; no post-PLL addend.
-  encoder_pll_.Update(compensated, dt_s, 0.0f);
-  enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
-  ma600_->StartSample();
-  enc_spi_pending_ = true;
-}
-void Application::RestoreEncoderCalBackup()
-{
-  if (!encoder_cal_backup_valid_ || ma600_.get() == nullptr)
-  {
-    return;
-  }
-  ma600_->SetSign(encoder_cal_backup_.sign);
-  ma600_->SetOffsetRad(encoder_cal_backup_.offset_rad);
-  ma600_->SetCommutationOffsets(encoder_cal_backup_.commutation_offset_rad,
-                                encoder_cal_backup_.commutation_valid);
-  enc_counts_rad_ = ma600_->angle_counts_rad();
-  enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
-  enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
-  encoder_cal_backup_valid_ = false;
-}
-
-
-void Application::ApplyEncoderCalResult()
-{
-  const auto& r = encoder_cal_.result();
-  if (!r.ok || ma600_.get() == nullptr)
-  {
-    return;
-  }
-  // Runtime register-like write (immediate).
-  ma600_->SetSign(r.sign);
-  ma600_->SetOffsetRad(r.offset_rad);
-  ma600_->SetCommutationOffsets(r.commutation_offset_rad,
-                                r.commutation_valid);
-  enc_counts_rad_ = ma600_->angle_counts_rad();
-  enc_theta_mech_rad_ = ma600_->angle_mech_rad();
-  encoder_pll_.Reset(CompensatedMechRad(), 0.0f);
-  enc_theta_elec_rad_ = encoder_pll_.electrical_theta();
-  encoder_cal_backup_valid_ = false;
-  // Defer flash write to main loop (ISR must not program flash).
-  encoder_cal_dirty_ = true;
-  encoder_cal_persisted_ = false;
-}
-
-void Application::PersistEncoderCalResult()
-{
-  if (ma600_.get() == nullptr)
-  {
-    return;
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);  // preserve any existing bemf override
-  data.offset_rad = ma600_->options().offset_rad;
-  data.sign = ma600_->options().sign;
-  data.commutation_offset_rad =
-      ma600_->options().commutation_offset_rad;
-  data.commutation_valid = ma600_->options().commutation_valid;
-  data.commutation_residual_rad = encoder_cal_.result().residual_rad_rms;
-  // Flash erase/program can stall; keep PWM ISR off.
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  encoder_cal_persisted_ = nvs::EncoderCalStore::Save(data);
-}
-
-void Application::ApplyBemfCalResult()
-{
-  const auto& r = bemf_cal_.result();
-  if (!r.ok || r.ke_v_s_per_rad <= 0.005f)
-  {
-    return;
-  }
-  if (current_loop_.get() != nullptr)
-  {
-    current_loop_->SetVPerHz(r.ke_v_s_per_rad);
-  }
-  if (position_loop_.get() != nullptr)
-  {
-    position_loop_->SetTorqueConstant(
-        board::IdentifiedTorqueConstantNmPerA(r.ke_v_s_per_rad));
-  }
-  // Defer flash write to main loop (ISR must not program flash).
-  bemf_cal_dirty_ = true;
-  bemf_cal_persisted_ = false;
-}
-
-void Application::PersistBemfCalResult()
-{
-  const auto& r = bemf_cal_.result();
-  if (!r.ok || r.ke_v_s_per_rad <= 0.005f)
-  {
-    return;
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);  // preserve encoder offset/sign
-  data.bemf_v_per_hz = r.ke_v_s_per_rad;
-  data.bemf_valid = true;
-  // Flash erase/program can stall; keep PWM ISR off.
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  bemf_cal_persisted_ = nvs::EncoderCalStore::Save(data);
-}
-
-void Application::ApplyRIdentResult()
-{
-  const auto& r = r_cal_.result();
-  if (!r.ok || r.resistance_ohm <= 0.001f)
-  {
-    return;
-  }
-  if (current_loop_.get() != nullptr)
-  {
-    current_loop_->SetResistanceInductance(
-        r.resistance_ohm, current_loop_->inductance_d_H(),
-        current_loop_->inductance_q_H());
-  }
-  // Defer flash write to main loop (ISR must not program flash).
-  r_cal_dirty_ = true;
-  r_cal_persisted_ = false;
-}
-
-void Application::PersistRIdentResult()
-{
-  const auto& r = r_cal_.result();
-  if (!r.ok || r.resistance_ohm <= 0.001f)
-  {
-    return;
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);  // preserve the other fields
-  data.resistance_ohm = r.resistance_ohm;
-  data.resistance_valid = true;
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  r_cal_persisted_ = nvs::EncoderCalStore::Save(data);
-}
-
-void Application::ApplyLIdentResult()
-{
-  const auto& r = l_cal_.result();
-  if (!r.ok || r.inductance_d_H <= 0.0f || r.inductance_q_H <= 0.0f)
-  {
-    return;
-  }
-  if (current_loop_.get() != nullptr)
-  {
-    current_loop_->SetResistanceInductance(
-        current_loop_->resistance_ohm(), r.inductance_d_H,
-        r.inductance_q_H);
-  }
-  l_cal_dirty_ = true;
-  l_cal_persisted_ = false;
-}
-
-void Application::PersistLIdentResult()
-{
-  const auto& r = l_cal_.result();
-  if (!r.ok || r.inductance_d_H <= 0.0f || r.inductance_q_H <= 0.0f)
-  {
-    return;
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);  // preserve the other fields
-  data.inductance_d_H = r.inductance_d_H;
-  data.inductance_q_H = r.inductance_q_H;
-  data.inductance_valid = true;
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  l_cal_persisted_ = nvs::EncoderCalStore::Save(data);
-}
-
-void Application::ApplyCoggingResult()
-{
-  const auto& r = cogging_cal_.result();
-  if (!r.ok)
-  {
-    return;
-  }
-  // Zero scale == no measurable cogging; disable rather than divide by zero.
-  cogging_table_ = r.table;
-  cogging_scale_ = r.scale;
-  cogging_valid_ = r.scale > 0.0f;
-  cogging_cal_dirty_ = true;
-  cogging_cal_persisted_ = false;
-}
-
-void Application::PersistCoggingResult()
-{
-  const auto& r = cogging_cal_.result();
-  if (!r.ok)
-  {
-    return;
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);  // preserve the other fields
-  data.cogging_table = r.table;
-  data.cogging_scale = r.scale;
-  data.cogging_valid = r.scale > 0.0f;
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  cogging_cal_persisted_ = nvs::EncoderCalStore::Save(data);
-}
-
-float Application::CoggingComp() const
-{
-  if (!cogging_valid_)
-  {
-    return 0.0f;
-  }
-  return math::InterpolateCogging(cogging_table_, cogging_scale_,
-                                  enc_theta_mech_rad_);
-}
-
-float Application::EncoderCompRad() const
-{
-  if (!encoder_comp_valid_)
-  {
-    return 0.0f;
-  }
-  // Index by raw counts angle (moteus indexes pre-compensation encoder).
-  return math::InterpolateEncoderComp(encoder_comp_table_, encoder_comp_scale_,
-                                      enc_counts_rad_);
-}
-
-void Application::ClearEncoderComp()
-{
-  encoder_comp_table_.fill(0);
-  encoder_comp_scale_ = 0.0f;
-  encoder_comp_valid_ = false;
-  encoder_comp_chunk_mask_ = 0;
-  encoder_comp_dirty_ = true;
-  encoder_comp_persisted_ = false;
-}
-
-void Application::SetEncoderCompChunk(uint8_t chunk, const int8_t* data,
-                                      size_t len)
-{
-  constexpr size_t kChunk = 32u;
-  if (data == nullptr || chunk >= 8u || len < kChunk)
-  {
-    return;
-  }
-  const size_t base = static_cast<size_t>(chunk) * kChunk;
-  for (size_t i = 0; i < kChunk; ++i)
-  {
-    encoder_comp_table_[base + i] = data[i];
-  }
-  encoder_comp_chunk_mask_ =
-      static_cast<uint8_t>(encoder_comp_chunk_mask_ | (1u << chunk));
-}
-
-bool Application::CommitEncoderComp(float scale_rad, bool persist)
-{
-  if (scale_rad <= 0.0f || encoder_comp_chunk_mask_ != 0xFFu)
-  {
-    encoder_comp_valid_ = false;
-    encoder_comp_scale_ = 0.0f;
-    return false;
-  }
-  encoder_comp_scale_ = scale_rad;
-  encoder_comp_valid_ = true;
-  if (persist)
-  {
-    encoder_comp_dirty_ = true;
-    encoder_comp_persisted_ = false;
-  }
-  return true;
-}
-
-void Application::PersistEncoderCompResult()
-{
-  if (!encoder_comp_valid_ || encoder_comp_scale_ <= 0.0f)
-  {
-    // Allow persisting a clear (disabled) table too.
-  }
-  nvs::EncoderCalData data{};
-  nvs::EncoderCalStore::Load(&data);
-  data.encoder_comp_table = encoder_comp_table_;
-  data.encoder_comp_scale = encoder_comp_scale_;
-  data.encoder_comp_valid = encoder_comp_valid_ && encoder_comp_scale_ > 0.0f;
-  if (phase_pwm_.get() != nullptr)
-  {
-    phase_pwm_->DisableControlIsr();
-  }
-  encoder_comp_persisted_ = nvs::EncoderCalStore::Save(data);
-}
 
 telemetry::xt_can::EncTelem Application::BuildEncTelem() const
 {
@@ -1450,17 +995,18 @@ telemetry::xt_can::EncTelem Application::BuildEncTelem() const
   e.ok = 0;
   e.reserved[0] = 0;
   e.reserved[1] = 0;
-  if (ma600_.get() == nullptr)
+  if (!encoder_.valid())
   {
     return e;
   }
-  e.raw = ma600_->raw();
+  const auto& encoder_sample = encoder_.sample();
+  e.raw = encoder_sample.raw;
   e.theta_mech_mrad =
-      static_cast<int32_t>(enc_theta_mech_rad_ * 1000.0f);
+      static_cast<int32_t>(encoder_sample.mechanical_rad * 1000.0f);
   e.theta_elec_mrad =
-      static_cast<int32_t>(enc_theta_elec_rad_ * 1000.0f);
-  e.sign = (ma600_->options().sign >= 0.0f) ? 1 : -1;
-  e.ok = encoder_ok_ ? 1 : 0;
+      static_cast<int32_t>(encoder_sample.electrical_rad * 1000.0f);
+  e.sign = encoder_.calibration().sign >= 0.0f ? 1 : -1;
+  e.ok = 1;
   return e;
 }
 
@@ -1488,22 +1034,21 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   {
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagFault);
   }
-  if (encoder_ok_)
+  if (encoder_.valid())
   {
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagEncOk);
   }
-  if (encoder_ok_ && encoder_pll_.theta_valid() &&
-      (mode_ == telemetry::xt_can::kModeDq ||
-       mode_ == telemetry::xt_can::kModeVel))
+  if (encoder_.valid() && encoder_.pll().theta_valid() &&
+      (mode_ == telemetry::xt_can::kModeServo))
   {
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagEncMode);
   }
 
   r.mode = mode_;
-  r.enc_ok = encoder_ok_ ? 1 : 0;
+  r.enc_ok = encoder_.valid() ? 1 : 0;
   r.enc_sign = 1;
   {
-    const uint32_t spikes = encoder_pll_.spike_count();
+    const uint32_t spikes = encoder_.pll().spike_count();
     r.enc_spike = (spikes > 255u) ? 255u : static_cast<uint8_t>(spikes);
   }
   r.id_mA = AmpsToMilli(id_A_);
@@ -1516,73 +1061,73 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   r.vq_mV = 0;
   r.bus_mV = static_cast<uint16_t>(board::kBusVoltage_V * 1000.0f + 0.5f);
   r.enc_raw = 0;
-  r.theta_mech_mrad = static_cast<int32_t>(enc_theta_mech_rad_ * 1000.0f);
+  r.theta_mech_mrad = static_cast<int32_t>(encoder_.sample().mechanical_rad * 1000.0f);
   r.omega_cmd_mrad_s = 0;
   r.omega_elec_mrad_s = 0;
   r.voltage_headroom_mV = 0;
 
-  if (ma600_.get() != nullptr)
+  if (encoder_.valid())
   {
-    r.enc_raw = ma600_->raw();
-    r.enc_sign = (ma600_->options().sign >= 0.0f) ? 1 : -1;
-    r.theta_elec_mrad =
-        static_cast<int32_t>(enc_theta_elec_rad_ * 1000.0f);
+    r.enc_raw = encoder_.sample().raw;
+    r.enc_sign = encoder_.calibration().sign >= 0.0f ? 1 : -1;
+    r.theta_elec_mrad = static_cast<int32_t>(
+        encoder_.sample().electrical_rad * 1000.0f);
   }
 
-  if (current_loop_.get() != nullptr && current_loop_->active())
+  if (foc_.get() != nullptr && foc_->active())
   {
-    r.idref_mA = AmpsToMilli(current_loop_->id_ref_A());
-    r.iqref_mA = AmpsToMilli(current_loop_->iq_ref_A());
-    r.vd_mV = static_cast<int32_t>(current_loop_->vd_V() * 1000.0f);
-    r.vq_mV = static_cast<int32_t>(current_loop_->vq_V() * 1000.0f);
-    r.bus_mV = static_cast<uint16_t>(current_loop_->bus_V() * 1000.0f + 0.5f);
+    r.idref_mA = AmpsToMilli(foc_->id_ref_A());
+    r.iqref_mA = AmpsToMilli(foc_->iq_ref_A());
+    r.vd_mV = static_cast<int32_t>(foc_->vd_V() * 1000.0f);
+    r.vq_mV = static_cast<int32_t>(foc_->vq_V() * 1000.0f);
+    r.bus_mV = static_cast<uint16_t>(foc_->bus_V() * 1000.0f + 0.5f);
     r.voltage_headroom_mV =
-        static_cast<int32_t>(current_loop_->voltage_headroom_V() * 1000.0f);
-    if (encoder_ok_ && encoder_pll_.theta_valid())
+        static_cast<int32_t>(foc_->voltage_headroom_V() * 1000.0f);
+    if (encoder_.valid() && encoder_.pll().theta_valid())
     {
       r.theta_elec_mrad =
-          static_cast<int32_t>(encoder_pll_.electrical_theta() * 1000.0f);
+          static_cast<int32_t>(encoder_.pll().electrical_theta() * 1000.0f);
     }
     else
     {
       r.theta_elec_mrad =
-          static_cast<int32_t>(current_loop_->theta_rad() * 1000.0f);
+          static_cast<int32_t>(foc_->theta_rad() * 1000.0f);
     }
   }
-  else if (voltage_foc_.get() != nullptr && voltage_foc_->active())
+  else if (dq_modulator_.get() != nullptr && dq_modulator_->active())
   {
     r.theta_elec_mrad =
-        static_cast<int32_t>(voltage_foc_->theta_rad() * 1000.0f);
-    r.vd_mV = static_cast<int32_t>(voltage_foc_->voltage_V() * 1000.0f);
+        static_cast<int32_t>(dq_modulator_->theta_rad() * 1000.0f);
+    r.vd_mV = static_cast<int32_t>(dq_modulator_->voltage_V() * 1000.0f);
     r.vq_mV = 0;
-    r.bus_mV = static_cast<uint16_t>(voltage_foc_->bus_V() * 1000.0f + 0.5f);
+    r.bus_mV = static_cast<uint16_t>(dq_modulator_->bus_V() * 1000.0f + 0.5f);
   }
 
   // Live omega fields are measured mechanical/electrical speed. Keep the
   // command separate so tracking error remains observable.
-  if (position_loop_.get() != nullptr && position_loop_->active())
+  if (servo_mode_.get() != nullptr && servo_mode_->active())
   {
     r.omega_cmd_mrad_s =
-        static_cast<int32_t>(position_loop_->velocity_cmd() * 1000.0f);
+        static_cast<int32_t>(servo_mode_->velocity_cmd() * 1000.0f);
   }
-  else if (current_loop_.get() != nullptr && current_loop_->active())
+  else if (foc_.get() != nullptr && foc_->active())
   {
     r.omega_cmd_mrad_s =
-        static_cast<int32_t>(current_loop_->theta_rate_rad_s() /
+        static_cast<int32_t>(foc_->theta_rate_rad_s() /
                              board::MotorParams().pole_pairs * 1000.0f);
   }
-  else if (voltage_foc_.get() != nullptr && voltage_foc_->active())
+  else if (dq_modulator_.get() != nullptr && dq_modulator_->active())
   {
     r.omega_cmd_mrad_s =
-        static_cast<int32_t>(voltage_foc_->theta_rate_rad_s() /
+        static_cast<int32_t>(dq_modulator_->theta_rate_rad_s() /
                              board::MotorParams().pole_pairs * 1000.0f);
   }
-  if (encoder_ok_ && encoder_pll_.theta_valid())
+  if (encoder_.valid() && encoder_.pll().theta_valid())
   {
     r.omega_mech_mrad_s =
-        static_cast<int32_t>(encoder_pll_.velocity_mech() * 1000.0f);
+        static_cast<int32_t>(encoder_.pll().velocity_mech() * 1000.0f);
     r.omega_elec_mrad_s = static_cast<int32_t>(
-        encoder_pll_.omega_elec() * 1000.0f);
+        encoder_.pll().omega_elec() * 1000.0f);
   }
   return r;
 }

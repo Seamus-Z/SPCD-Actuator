@@ -3,10 +3,14 @@
 
 #include <cstdint>
 
-#include "foc_ctrl/simple_pi.h"
+#include "math/foc/pi.h"
 
-namespace foc_ctrl
+namespace math { namespace servo_mode
 {
+using foc::IsFinite;
+using foc::Limit;
+using foc::QuietNan;
+
 
 class PID
 {
@@ -105,4 +109,5 @@ class PID
   State* const state_;
 };
 
-}  // namespace foc_ctrl
+}  // namespace servo_mode
+}  // namespace math

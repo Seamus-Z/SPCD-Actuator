@@ -10,7 +10,7 @@
 
 #include "math/constants.h"
 
-namespace foc_ctrl
+namespace math { namespace servo_mode
 {
 
 class EncoderPll
@@ -113,6 +113,7 @@ class EncoderPll
   float velocity_mech() const { return velocity_; }      // rad/s mech
   float electrical_theta() const { return electrical_theta_; }
   float omega_elec() const { return velocity_ * options_.pole_pairs; }
+  float pole_pairs() const { return options_.pole_pairs; }
 
   // Sticky lifetime counter (saturates). Useful in Live logs while hunting
   // sudden surge/reverse: if this climbs, encoder/SPI glitches are real.
@@ -175,4 +176,5 @@ class EncoderPll
   float last_spike_velocity_rad_s_ = 0.0f;
 };
 
-}  // namespace foc_ctrl
+}  // namespace servo_mode
+}  // namespace math

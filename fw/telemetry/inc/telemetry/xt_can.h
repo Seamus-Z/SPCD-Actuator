@@ -25,13 +25,11 @@ inline constexpr uint8_t kTypeCal = 8;
 inline constexpr uint8_t kTypeCtrlReply = 9;
 
 inline constexpr uint8_t kCmdStop = 0;
-inline constexpr uint8_t kCmdDq = 1;
-inline constexpr uint8_t kCmdVfoc = 2;
-inline constexpr uint8_t kCmdRaw = 3;
 inline constexpr uint8_t kCmdInfo = 4;
 inline constexpr uint8_t kCmdSnap = 5;
-// moteus-style velocity: position=NaN + ω_mech (PID → Iq).
-inline constexpr uint8_t kCmdVel = 6;
+// Servo velocity command: velocity + d-axis reference. The FOC execution
+// path remains internal and is never exposed as a DQ or voltage mode.
+inline constexpr uint8_t kCmdServo = 6;
 // Calibration: subcmd + args (see CalRequest).
 inline constexpr uint8_t kCmdCal = 7;
 // Idle poll: no mode change, reply with CtrlReply.
@@ -42,13 +40,12 @@ inline constexpr uint8_t kCmdEncComp = 9;
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 4;
-inline constexpr uint8_t kFwPatch = 18;
+inline constexpr uint8_t kFwPatch = 19;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
 {
-  return cmd == kCmdStop || cmd == kCmdDq || cmd == kCmdVfoc ||
-         cmd == kCmdRaw || cmd == kCmdVel || cmd == kCmdQuery;
+  return cmd == kCmdStop || cmd == kCmdServo || cmd == kCmdQuery;
 }
 
 inline constexpr uint8_t kCalSubAbort = 0;
@@ -113,11 +110,8 @@ inline constexpr uint16_t kFlagEncOk = 1u << 4;
 inline constexpr uint16_t kFlagEncMode = 1u << 5;
 
 inline constexpr uint8_t kModeStop = 0;
-inline constexpr uint8_t kModeRaw = 1;
-inline constexpr uint8_t kModeVfoc = 2;
-inline constexpr uint8_t kModeDq = 3;
-inline constexpr uint8_t kModeVel = 4;
-inline constexpr uint8_t kModeCal = 5;
+inline constexpr uint8_t kModeServo = 1;
+inline constexpr uint8_t kModeCal = 2;
 
 inline constexpr uint8_t kCalStateIdle = 0;
 inline constexpr uint8_t kCalStateSense = 1;
@@ -221,7 +215,7 @@ struct EncTelem
   uint8_t reserved[2];
 } __attribute__((packed));
 
-// Device -> host reply to Query/Stop/Dq/Vel/Vfoc/Raw (replaces free-running Tel).
+// Device -> host reply to Query/Stop/Servo (replaces free-running Tel).
 // seq echoes the command seq. Live Id/Iq + encoder in one FD frame.
 struct CtrlReply
 {

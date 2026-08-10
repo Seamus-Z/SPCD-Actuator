@@ -10,7 +10,7 @@
 
 #include <cstdint>
 
-namespace calibration
+namespace math { namespace calibration
 {
 
 class BemfIdentCal
@@ -244,4 +244,5 @@ class BemfIdentCal
   Result result_{};
 };
 
-}  // namespace calibration
+}  // namespace math { namespace calibration
+}  // namespace math

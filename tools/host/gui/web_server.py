@@ -45,7 +45,6 @@ from xt_proto import (  # noqa: E402
     SnapData,
     SnapMeta,
     Telemetry,
-    pack_dq,
     pack_query,
     pack_cal_abort,
     pack_cal_bemf,
@@ -55,12 +54,10 @@ from xt_proto import (  # noqa: E402
     pack_cal_l,
     pack_cal_cogging,
     pack_enc_comp_clear,
-    pack_raw,
-    pack_vel,
+    pack_servo,
     pack_info,
     pack_snap,
     pack_stop,
-    pack_vfoc,
     parse_frame,
     cmd_id,
     tel_id,
@@ -666,31 +663,10 @@ class CanBridge:
             return pack_query(seq)
         if op == "stop":
             return pack_stop(seq)
-        if op == "dq":
-            return pack_dq(
-                float(args.get("id", 0)),
-                float(args.get("iq", 0)),
-                float(args.get("omega", 0)),
-                seq,
-            )
-        if op == "vfoc":
-            return pack_vfoc(
-                float(args.get("theta", 0)),
-                float(args.get("v", 0)),
-                float(args.get("omega", 0)),
-                seq,
-            )
-        if op == "vel":
-            return pack_vel(
+        if op == "servo":
+            return pack_servo(
                 float(args.get("omega_mech", 0)),
                 float(args.get("id", 0)),
-                seq,
-            )
-        if op == "raw":
-            return pack_raw(
-                int(args.get("a", 0)),
-                int(args.get("b", 0)),
-                int(args.get("c", 0)),
                 seq,
             )
         return pack_query(seq)
@@ -888,7 +864,7 @@ class CanBridge:
                 try:
                     while time.monotonic() - t0 < seconds:
                         seq = self._next_seq()
-                        self._send_raw(pack_vel(omega_mech, 0.0, seq), log=False)
+                        self._send_raw(pack_servo(omega_mech, 0.0, seq), log=False)
                         next_t += period
                         delay = next_t - time.monotonic()
                         if delay > 0:
@@ -1460,7 +1436,7 @@ def make_handler(bridge: CanBridge):
                     )
                     self._json(200, {"ok": True, "status": 0, "stream": "vfoc"})
                     return
-                if op == "vel":
+                if op == "servo":
                     bridge.set_stream(
                         "vel",
                         omega_mech=float(req.get("omega_mech", 0)),

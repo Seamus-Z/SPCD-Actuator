@@ -4,15 +4,43 @@
 // Velocity mode: position=NaN, integrate velocity command (moteus kPosition).
 #pragma once
 
-#include "foc_ctrl/pid.h"
+#include "math/servo_mode/pid.h"
 #include "math/constants.h"
 
-namespace foc_ctrl
+namespace math { namespace servo_mode
 {
+using foc::IsFinite;
+using foc::Limit;
+using foc::QuietNan;
 
-class PositionLoop
+
+class ServoMode
 {
  public:
+  // Application supplies a complete command snapshot; this algorithm never
+  // reads CAN, hardware registers, or mutable application state.
+  struct Command
+  {
+    float position_rad = QuietNan();
+    float velocity_rad_s = 0.0f;
+    float id_ref_A = 0.0f;
+  };
+
+  struct Observation
+  {
+    float position_rad = 0.0f;
+    float velocity_rad_s = 0.0f;
+    float dt_s = 0.0f;
+  };
+
+  struct Output
+  {
+    float id_ref_A = 0.0f;
+    float iq_ref_A = 0.0f;
+    float torque_Nm = 0.0f;
+    bool faulted = false;
+  };
+
   struct Options
   {
     PID::Config pid{};
@@ -31,12 +59,17 @@ class PositionLoop
     float max_velocity_error_rad_s = 0.0f;
   };
 
-  explicit PositionLoop(const Options& options)
+  explicit ServoMode(const Options& options)
       : options_(options), pid_(&options_.pid, &pid_state_)
   {
   }
 
   // position_cmd_rad = QuietNan() → velocity tracking (moteus velocity mode).
+  void Start(const Command& command)
+  {
+    Start(command.position_rad, command.velocity_rad_s, command.id_ref_A);
+  }
+
   void Start(float position_cmd_rad, float velocity_cmd_mech_rad_s,
              float id_ref_A = 0.0f)
   {
@@ -93,6 +126,18 @@ class PositionLoop
   }
   float velocity_cmd() const { return velocity_cmd_hz_ * math::k2Pi; }
   float control_velocity() const { return control_velocity_hz_ * math::k2Pi; }
+
+  Output Step(const Observation& observation)
+  {
+    const float iq_ref = Step(observation.dt_s, observation.position_rad,
+                              observation.velocity_rad_s);
+    Output output{};
+    output.id_ref_A = options_.id_ref_A;
+    output.iq_ref_A = iq_ref;
+    output.torque_Nm = torque_Nm_;
+    output.faulted = faulted_;
+    return output;
+  }
 
   // Returns iq_ref [A]. measured_* are mechanical rad / rad/s (unwrapped OK).
   float Step(float dt_s, float measured_position_rad,
@@ -306,4 +351,5 @@ class PositionLoop
   bool faulted_ = false;
 };
 
-}  // namespace foc_ctrl
+}  // namespace servo_mode
+}  // namespace math

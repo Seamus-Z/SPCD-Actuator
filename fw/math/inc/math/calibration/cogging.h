@@ -19,7 +19,7 @@
 #include "math/cogging.h"
 #include "math/constants.h"
 
-namespace calibration
+namespace math { namespace calibration
 {
 
 class CoggingCal
@@ -390,4 +390,5 @@ class CoggingCal
   Result result_{};
 };
 
-}  // namespace calibration
+}  // namespace math { namespace calibration
+}  // namespace math

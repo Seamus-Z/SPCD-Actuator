@@ -19,12 +19,9 @@ TYPE_CAL = 8
 TYPE_CTRL_REPLY = 9
 
 CMD_STOP = 0
-CMD_DQ = 1
-CMD_VFOC = 2
-CMD_RAW = 3
 CMD_INFO = 4
 CMD_SNAP = 5
-CMD_VEL = 6
+CMD_SERVO = 6
 CMD_CAL = 7
 CMD_QUERY = 8
 CMD_ENC_COMP = 9
@@ -64,11 +61,8 @@ FLAG_ENC_OK = 1 << 4
 FLAG_ENC_MODE = 1 << 5
 
 MODE_STOP = 0
-MODE_RAW = 1
-MODE_VFOC = 2
-MODE_DQ = 3
-MODE_VEL = 4
-MODE_CAL = 5
+MODE_SERVO = 1
+MODE_CAL = 2
 
 
 def cmd_id(node_id: int = 1) -> int:
@@ -111,21 +105,11 @@ def pack_snap(
     )
 
 
-def pack_dq(id_a: float, iq_a: float, omega_rad_s: float, seq: int = 0) -> bytes:
-    return pack_header(TYPE_CMD, seq) + struct.pack(
-        "<Biii",
-        CMD_DQ,
-        int(round(id_a * 1000)),
-        int(round(iq_a * 1000)),
-        int(round(omega_rad_s * 1000)),
-    )
-
-
-def pack_vel(omega_mech_rad_s: float, id_a: float = 0.0, seq: int = 0) -> bytes:
-    """moteus-style velocity: position=NaN + ω_mech [rad/s], optional Id."""
+def pack_servo(omega_mech_rad_s: float, id_a: float = 0.0, seq: int = 0) -> bytes:
+    """servo velocity: position=NaN + ω_mech [rad/s], optional Id."""
     return pack_header(TYPE_CMD, seq) + struct.pack(
         "<Bii",
-        CMD_VEL,
+        CMD_SERVO,
         int(round(omega_mech_rad_s * 1000)),
         int(round(id_a * 1000)),
     )
@@ -282,20 +266,6 @@ def pack_enc_comp_commit(peak_corr_rad: float, seq: int = 0) -> bytes:
         scale_urad,
         bytes(32),
     )
-
-
-def pack_vfoc(theta_rad: float, v: float, omega_rad_s: float, seq: int = 0) -> bytes:
-    return pack_header(TYPE_CMD, seq) + struct.pack(
-        "<Biii",
-        CMD_VFOC,
-        int(round(theta_rad * 1000)),
-        int(round(v * 1000)),
-        int(round(omega_rad_s * 1000)),
-    )
-
-
-def pack_raw(a: int, b: int, c: int, seq: int = 0) -> bytes:
-    return pack_header(TYPE_CMD, seq) + struct.pack("<BHHH", CMD_RAW, a, b, c)
 
 
 @dataclass

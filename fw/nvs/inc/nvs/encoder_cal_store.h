@@ -14,7 +14,7 @@
 namespace nvs
 {
 
-struct EncoderCalData
+struct MotorConfig
 {
   float offset_rad = 0.0f;
   float sign = 1.0f;
@@ -36,7 +36,7 @@ struct EncoderCalData
   bool encoder_comp_valid = false;
 };
 
-class EncoderCalStore
+class MotorConfigStore
 {
  public:
   static constexpr uint32_t kMagic = 0x58454E43u;  // 'XENC'
@@ -147,7 +147,7 @@ class EncoderCalStore
     uint32_t crc = 0;
   } __attribute__((packed));
 
-  static bool Load(EncoderCalData* out)
+  static bool Load(MotorConfig* out)
   {
     if (out == nullptr)
     {
@@ -171,7 +171,7 @@ class EncoderCalStore
       {
         return false;
       }
-      *out = EncoderCalData{};
+      *out = MotorConfig{};
       out->offset_rad = rec.offset_rad;
       out->sign = rec.sign;
       std::memcpy(out->commutation_offset_rad.data(),
@@ -210,7 +210,7 @@ class EncoderCalStore
       {
         return false;
       }
-      *out = EncoderCalData{};
+      *out = MotorConfig{};
       out->offset_rad = rec.offset_rad;
       out->sign = rec.sign;
       std::memcpy(out->commutation_offset_rad.data(),
@@ -245,7 +245,7 @@ class EncoderCalStore
       {
         return false;
       }
-      *out = EncoderCalData{};
+      *out = MotorConfig{};
       out->offset_rad = rec.offset_rad;
       out->sign = rec.sign;
       std::memcpy(out->commutation_offset_rad.data(),
@@ -276,7 +276,7 @@ class EncoderCalStore
       {
         return false;
       }
-      *out = EncoderCalData{};
+      *out = MotorConfig{};
       out->offset_rad = rec.offset_rad;
       out->sign = rec.sign;
       // V4 did not persist fit quality. Preserve motor parameters and global
@@ -301,7 +301,7 @@ class EncoderCalStore
       {
         return false;
       }
-      *out = EncoderCalData{};
+      *out = MotorConfig{};
       out->offset_rad = rec.offset_rad;
       out->sign = rec.sign;
       out->bemf_v_per_hz = rec.bemf_v_per_hz;
@@ -316,7 +316,7 @@ class EncoderCalStore
     return false;
   }
 
-  static bool Save(const EncoderCalData& data)
+  static bool Save(const MotorConfig& data)
   {
     Record rec{};
     rec.magic = kMagic;
@@ -382,7 +382,7 @@ class EncoderCalStore
     }
     HAL_FLASH_Lock();
 
-    EncoderCalData verify{};
+    MotorConfig verify{};
     return Load(&verify) && verify.offset_rad == data.offset_rad &&
            verify.sign == rec.sign &&
            verify.commutation_valid == (rec.commutation_valid != 0) &&

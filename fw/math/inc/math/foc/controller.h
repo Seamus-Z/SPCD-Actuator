@@ -3,18 +3,18 @@
 
 #include <cstdint>
 
-#include "foc_ctrl/simple_pi.h"
+#include "math/foc/pi.h"
 #include "math/constants.h"
-#include "math/foc.h"
+#include "math/foc/transform.h"
 
 extern "C" {
 float sqrtf(float);
 }
 
-namespace foc_ctrl
+namespace math { namespace foc
 {
 
-class CurrentLoop
+class FocController
 {
  public:
   struct Options
@@ -58,7 +58,7 @@ class CurrentLoop
     uint16_t c_milli = 0;
   };
 
-  explicit CurrentLoop(const Options& options)
+  explicit FocController(const Options& options)
       : options_(options),
         pi_d_(&pi_d_cfg_, &pi_d_state_),
         pi_q_(&pi_q_cfg_, &pi_q_state_)
@@ -320,4 +320,5 @@ class CurrentLoop
   float vq_V_ = 0.0f;
 };
 
-}  // namespace foc_ctrl
+}  // namespace foc
+}  // namespace math

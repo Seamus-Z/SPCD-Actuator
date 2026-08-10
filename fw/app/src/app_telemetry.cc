@@ -158,10 +158,10 @@ size_t AppTelemetry::FormatCur(char* out, size_t out_capacity) const
   // Prefer ISR-cached sample while control is running (avoid racing Read()).
   const bool control_on =
       application_ != nullptr &&
-      ((application_->voltage_foc() != nullptr &&
-        application_->voltage_foc()->active()) ||
-       (application_->current_loop() != nullptr &&
-        application_->current_loop()->active()));
+      ((application_->dq_modulator() != nullptr &&
+        application_->dq_modulator()->active()) ||
+       (application_->foc() != nullptr &&
+        application_->foc()->active()));
   const auto s =
       control_on ? application_->last_current() : current_adc_->Read();
   using telemetry::text::AppendKeyUInt;
@@ -207,7 +207,7 @@ size_t AppTelemetry::FormatCur(char* out, size_t out_capacity) const
                         mA(application_->id_A()), true);
     pos = AppendKeyUInt(out, out_capacity, pos, "iq_mA_p100k",
                         mA(application_->iq_A()), true);
-    const foc_ctrl::CurrentLoop* loop = application_->current_loop();
+    const math::foc::FocController* loop = application_->foc();
     pos = AppendKeyUInt(out, out_capacity, pos, "iloop",
                         (loop != nullptr && loop->active()) ? 1u : 0u, true);
     if (loop != nullptr)
@@ -249,10 +249,10 @@ size_t AppTelemetry::FormatPwm(char* out, size_t out_capacity) const
   pos = AppendKeyUInt(out, out_capacity, pos, "c", phase_pwm_->duty_c(), true);
 
   // Open-loop voltage FOC / current-loop snapshot (milli-units; signed via bias).
-  const foc_ctrl::VoltageFoc* foc =
-      (application_ != nullptr) ? application_->voltage_foc() : nullptr;
-  const foc_ctrl::CurrentLoop* loop =
-      (application_ != nullptr) ? application_->current_loop() : nullptr;
+  const math::foc::DqModulator* foc =
+      (application_ != nullptr) ? application_->dq_modulator() : nullptr;
+  const math::foc::FocController* loop =
+      (application_ != nullptr) ? application_->foc() : nullptr;
   const bool foc_on = foc != nullptr && foc->active();
   const bool loop_on = loop != nullptr && loop->active();
   pos = AppendKeyUInt(out, out_capacity, pos, "foc", foc_on ? 1u : 0u, true);

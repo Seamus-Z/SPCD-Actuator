@@ -4,13 +4,14 @@
 #include "HAL/fdcan.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
-#include "foc_ctrl/current_loop.h"
-#include "foc_ctrl/encoder_pll.h"
-#include "foc_ctrl/position_loop.h"
-#include "foc_ctrl/voltage_foc.h"
+#include "math/foc/controller.h"
+#include "math/servo_mode/encoder_pll.h"
+#include "math/servo_mode/servo_mode.h"
+#include "math/foc/modulator.h"
 #include "math/constants.h"
 #include "device/drv8353s.h"
 #include "device/ma600.h"
+#include "middleware/encoder/encoder_service.h"
 #include "device/motor.h"
 
 namespace app
@@ -109,14 +110,12 @@ inline device::Ma600::Options Ma600Options()
   // and the motor stalls around ~80. 160 us keeps noise down without eating
   // the entire torque budget at top speed.
   options.filter_us = 160;
-  options.sign = 1.0f;
-  options.offset_rad = 0.0f;
   return options;
 }
 
-inline foc_ctrl::EncoderPll::Options EncoderPllOptions()
+inline math::servo_mode::EncoderPll::Options EncoderPllOptions()
 {
-  foc_ctrl::EncoderPll::Options options;
+  math::servo_mode::EncoderPll::Options options;
   // moteus SourceConfig default pll_filter_hz = 400 (3 dB cutoff).
   options.pll_filter_hz = 400.0f;
   options.pole_pairs = MotorParams().pole_pairs;
@@ -127,16 +126,25 @@ inline foc_ctrl::EncoderPll::Options EncoderPllOptions()
   return options;
 }
 
-inline foc_ctrl::VoltageFoc::Options VoltageFocOptions()
+inline middleware::encoder::EncoderService::Options EncoderOptions()
 {
-  foc_ctrl::VoltageFoc::Options options;
+  middleware::encoder::EncoderService::Options options;
+  options.sensor = Ma600Options();
+  options.pll = EncoderPllOptions();
+  return options;
+}
+
+
+inline math::foc::DqModulator::Options DqModulatorOptions()
+{
+  math::foc::DqModulator::Options options;
   options.bus_V = kBusVoltage_V;
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
   return options;
 }
 
-// Vendor Ke is line-to-line peak. CurrentLoop uses phase/dq peak voltage,
+// Vendor Ke is line-to-line peak. FocController uses phase/dq peak voltage,
 // therefore convert by 1/sqrt(3) before applying BEMF feedforward.
 inline float BemfVPerMechRadS(const device::motor::Params& motor)
 {
@@ -157,19 +165,19 @@ inline float IdentifiedTorqueConstantNmPerA(float ke_dq_v_s_per_rad)
   return 1.5f * ke_dq_v_s_per_rad;
 }
 
-inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
+inline math::foc::FocController::Options FocControllerOptions()
 {
   const auto& motor = MotorParams();
-  foc_ctrl::CurrentLoop::Options options;
+  math::foc::FocController::Options options;
   options.bus_V = kBusVoltage_V;
   options.min_duty = static_cast<float>(hal::PhasePwm::kDutyMinMilli) / 1000.0f;
   options.max_duty = static_cast<float>(hal::PhasePwm::kDutyMaxMilli) / 1000.0f;
-  constexpr float kCurrentLoopHz = 200.0f;
-  const float current_loop_w = math::k2Pi * kCurrentLoopHz;
-  options.kp_d = current_loop_w * motor.phase_inductance_H;
-  options.kp_q = current_loop_w * motor.phase_inductance_H;
-  options.ki_d = current_loop_w * motor.phase_resistance_ohm;
-  options.ki_q = current_loop_w * motor.phase_resistance_ohm;
+  constexpr float kFocControllerHz = 200.0f;
+  const float foc_w = math::k2Pi * kFocControllerHz;
+  options.kp_d = foc_w * motor.phase_inductance_H;
+  options.kp_q = foc_w * motor.phase_inductance_H;
+  options.ki_d = foc_w * motor.phase_resistance_ohm;
+  options.ki_q = foc_w * motor.phase_resistance_ohm;
   options.max_current_desired_rate_A_s = 10000.0f;
   options.max_current_A = motor.max_phase_current_A;
   options.resistance_ohm = motor.phase_resistance_ohm;
@@ -191,10 +199,10 @@ inline foc_ctrl::CurrentLoop::Options CurrentLoopOptions()
 // kp=0.04 was far too soft (≈7.5 turns of velocity-integrator windup before
 // torque limit) and produced surge/reverse when the slip clamp chased an
 // encoder/PLL spike. Restore the prior Nm/turn gains and keep a tight slip.
-inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
+inline math::servo_mode::ServoMode::Options ServoModeOptions()
 {
   const auto& motor = MotorParams();
-  foc_ctrl::PositionLoop::Options options;
+  math::servo_mode::ServoMode::Options options;
   options.pid.kp = 4.0f;
   options.pid.ki = 0.0f;
   options.pid.kd = 0.05f;

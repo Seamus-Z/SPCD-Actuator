@@ -5,8 +5,6 @@
 
 #include "HAL/millisecond_timer.h"
 #include "HAL/stm32_spi.h"
-#include "math/constants.h"
-#include "math/commutation.h"
 #include "PinNames.h"
 #include "stm32g4xx_hal.h"
 
@@ -28,11 +26,6 @@ class Ma600
     uint16_t filter_us = 1024;
     uint8_t bct = 0;
     uint8_t enable_trim = 0;
-    // Mechanical angle = sign * raw/CPR * 2π + offset.
-    float sign = 1.0f;
-    float offset_rad = 0.0f;
-    math::CommutationTable commutation_offset_rad{};
-    bool commutation_valid = false;
   };
 
   Ma600(hal::MillisecondTimer* timer, const Options& options)
@@ -89,43 +82,6 @@ class Ma600
   bool ok() const { return ok_ && !error_; }
   bool error() const { return error_; }
 
-  // Counts angle only (no sign/offset) — used by phase calibration.
-  float angle_counts_rad() const
-  {
-    return math::WrapZeroToTwoPi(
-        (static_cast<float>(raw_) / kCpr) * math::k2Pi);
-  }
-
-  // Mechanical shaft angle [0, 2π).
-  float angle_mech_rad() const
-  {
-    const float turns = options_.sign * (static_cast<float>(raw_) / kCpr);
-    return math::WrapZeroToTwoPi(turns * math::k2Pi + options_.offset_rad);
-  }
-
-  // Electrical angle for FOC: mech * pole_pairs.
-  float angle_elec_rad(float pole_pairs) const
-  {
-    return math::WrapZeroToTwoPi(angle_mech_rad() * pole_pairs);
-  }
-
-  float commutation_offset_rad() const
-  {
-    return options_.commutation_valid
-               ? math::InterpolateCommutationOffset(
-                     options_.commutation_offset_rad, angle_counts_rad())
-               : 0.0f;
-  }
-
-  void SetOffsetRad(float offset_rad) { options_.offset_rad = offset_rad; }
-  void SetSign(float sign) { options_.sign = (sign >= 0.0f) ? 1.0f : -1.0f; }
-  void SetCommutationOffsets(const math::CommutationTable& offsets, bool valid)
-  {
-    options_.commutation_offset_rad = offsets;
-    options_.commutation_valid = valid;
-  }
-
-  const Options& options() const { return options_; }
 
  private:
   // Returns true if configuration failed (matches moteus MA732::SetConfig).

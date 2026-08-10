@@ -42,7 +42,7 @@ from xt_proto import (  # noqa: E402
     pack_enc_comp_clear,
     pack_enc_comp_commit,
     pack_stop,
-    pack_vel,
+    pack_servo,
     parse_frame,
     tel_id,
 )
@@ -119,7 +119,7 @@ def samples_from_live(bus, can_mod, node: int, omega: float, seconds: float, rat
     try:
         while time.monotonic() - t0 < seconds:
             seq = (seq + 1) & 0xFF
-            send(pack_vel(omega, 0.0, seq))
+            send(pack_servo(omega, 0.0, seq))
             # drain replies
             while True:
                 frame = bus.recv(timeout=0.0)

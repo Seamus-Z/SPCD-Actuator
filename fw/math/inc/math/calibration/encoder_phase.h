@@ -14,9 +14,9 @@ float sqrtf(float);
 
 #include "math/constants.h"
 #include "math/commutation.h"
-#include "math/foc.h"
+#include "math/foc/transform.h"
 
-namespace calibration
+namespace math { namespace calibration
 {
 
 class EncoderPhaseCal
@@ -517,4 +517,5 @@ class EncoderPhaseCal
   Result result_{};
 };
 
-}  // namespace calibration
+}  // namespace math { namespace calibration
+}  // namespace math

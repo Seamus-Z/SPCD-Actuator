@@ -17,7 +17,7 @@ cc_library(
     includes = ["inc"],
     deps = [
         "//fw/HAL:hal",
-        "//fw/math:math",
+        "//fw/math:base",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],
     copts = [
