@@ -212,7 +212,10 @@ inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
   }
   options.max_torque_Nm =
       options.torque_constant_Nm_A * options.max_iq_A;
-  options.acceleration_limit_rad_s2 = 15.0f * math::k2Pi;
+  // 0 disables the accel slew. Needed for host sine bandwidth tests
+  // (10 Hz × ±200 rad/s needs ~1.26e4 rad/s² peak). Re-enable a finite
+  // limit for gentle jog if desired.
+  options.acceleration_limit_rad_s2 = 0.0f;
   // Soften D when |ω_meas - ω_cmd| is small so encoder noise does not jitter Iq.
   options.velocity_threshold = 0.5f;
   // 200 rad/s is below the 48 V DQ voltage limit for this motor. Retain an
@@ -220,9 +223,10 @@ inline foc_ctrl::PositionLoop::Options PositionLoopOptions()
   options.max_velocity_cmd_rad_s =
       motor.fw_speed_rpm * (math::k2Pi / 60.0f);
   options.max_position_slip_rad = math::kPi;
-  // Keep the virtual trajectory close to the rotor. 100 rad/s let a single
-  // encoder spike yank the command to ~cmd±100 and cause surge/reverse.
-  options.max_velocity_error_rad_s = 8.0f;
+  // 0 disables velocity-slip reshape so a host sine command is not flattened
+  // by the virtual trajectory. The command-side clamp still prevents the
+  // trajectory from exceeding the host command.
+  options.max_velocity_error_rad_s = 0.0f;
   return options;
 }
 

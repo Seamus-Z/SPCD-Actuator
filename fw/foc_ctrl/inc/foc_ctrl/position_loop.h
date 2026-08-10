@@ -132,14 +132,18 @@ class PositionLoop
       control_velocity_hz_ = velocity_cmd_hz_;
     }
 
-    // moteus max_velocity_slip: in velocity mode keep the virtual speed within
-    // slip of the rotor instead of faulting, so a torque-limited high-speed
-    // command rides at the achievable speed rather than snapping back to 0.
+    // Velocity slip, underspeed-only. If the rotor cannot keep up with the
+    // virtual trajectory, pull the trajectory down toward measured so a
+    // torque/voltage-limited command rides at the achievable speed.
+    //
+    // Do NOT pull the trajectory *up* toward measured. That branch glued
+    // control_velocity to ω_meas during deceleration and made +ω → −ω
+    // reversals fail (accel stepped down, slip yanked it back every cycle).
+    // Overspeed is handled by the command-side clamp below; BEMF/phase-lead
+    // already use measured ω, so the old up-yank is no longer needed.
     if (!IsFinite(position_cmd_turns_) &&
         options_.max_velocity_error_rad_s > 0.0f)
     {
-      // Ignore absurd speed samples (SPI/PLL glitches). Chasing them with the
-      // slip clamp is what produced sudden surge/reverse while "at speed".
       const float max_cmd_hz = options_.max_velocity_cmd_rad_s / math::k2Pi;
       const bool measured_plausible =
           max_cmd_hz <= 0.0f ||
@@ -149,19 +153,14 @@ class PositionLoop
       {
         const float slip_hz = options_.max_velocity_error_rad_s / math::k2Pi;
         const float err_hz = measured_hz - control_velocity_hz_;
-        if (err_hz > slip_hz)
-        {
-          control_velocity_hz_ = measured_hz - slip_hz;
-        }
-        else if (err_hz < -slip_hz)
+        if (err_hz < -slip_hz)
         {
           control_velocity_hz_ = measured_hz + slip_hz;
         }
       }
     }
-    // Never let slip chase an overspeed past the host command. Pulling
-    // control_velocity up to measured (then feeding BEMF from it) was the
-    // 60→~180 rad/s lock path after commutation lag collapsed torque.
+    // Never let the virtual trajectory exceed the host command. This stops
+    // overspeed lock without blocking deceleration/reversal.
     if (!IsFinite(position_cmd_turns_))
     {
       if (velocity_cmd_hz_ >= 0.0f)
