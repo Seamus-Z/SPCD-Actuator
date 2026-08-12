@@ -31,8 +31,10 @@ class Application
 
   [[noreturn]] void Run();
 
-  // Command-side transition into the only externally controllable motor mode.
-  uint8_t StartServo(float velocity_rad_s, float id_ref_A);
+  // Position/velocity servo (moteus kPosition).
+  uint8_t StartServo(const math::servo_mode::ServoMode::Command& command);
+  // Direct Id/Iq current mode (moteus kCurrent).
+  uint8_t StartCurrent(float id_A, float iq_A);
 
   State state() const { return state_; }
   ::pool::Pool* pool() const { return pool_; }

@@ -40,10 +40,34 @@
       <h2 style="margin-top:1.2rem">Command</h2>
       <label>Id (A)</label>
       <input id="idA" type="number" step="0.1" value="0" />
-      <label>ω mech (rad/s) — closed-loop servo，限幅 ±200</label>
+      <label>Iq (A) — current mode</label>
+      <input id="iqA" type="number" step="0.1" value="0.5" />
+      <label>ω mech (rad/s) — 实际巡航速度 ±200</label>
       <input id="omegaMech" type="number" step="1" min="-200" max="200" value="20" />
+      <label>position mech (rad) — 0~6.28；填了=按上面 ω 走到该点后停；留空=纯速度</label>
+      <input id="positionMech" type="number" step="0.1" min="0" max="6.28318530718" placeholder="0~6.28 or empty" />
+      <label>stop position (rad) — 仅速度模式可选；留空=无</label>
+      <input id="stopPositionMech" type="number" step="0.1" min="0" max="6.28318530718" placeholder="optional" />
+      <label>max torque (Nm) — 留空=板级默认</label>
+      <input id="maxTorqueNm" type="number" step="0.05" min="0" placeholder="default" />
+      <label>feedforward (Nm)</label>
+      <input id="feedforwardNm" type="number" step="0.01" value="0" />
+      <details style="margin-top:0.6rem">
+        <summary>高级 moteus 参数</summary>
+        <label>velocity limit (rad/s) — 留空=默认</label>
+        <input id="velocityLimit" type="number" step="1" placeholder="default" />
+        <label>accel limit (rad/s²) — 留空=默认</label>
+        <input id="accelLimit" type="number" step="1" placeholder="default" />
+        <label>kp_scale / kd_scale / ilimit_scale</label>
+        <div class="row">
+          <input id="kpScale" type="number" step="0.1" value="1" />
+          <input id="kdScale" type="number" step="0.1" value="1" />
+          <input id="ilimitScale" type="number" step="0.1" value="1" />
+        </div>
+      </details>
       <div class="row">
         <button id="btnVel" type="button">Start servo</button>
+        <button id="btnCurrent" type="button">Start current</button>
         <button class="stop" id="btnStop" type="button">Stop</button>
       </div>
       <div class="status" id="status">idle</div>
@@ -98,7 +122,7 @@
             <button class="ghost" id="btnSnapAuto" type="button">Autoscale</button>
           </div>
         </div>
-        <div class="status" id="snapStatus">先 Start dq/vfoc，再 Capture（PWM 率采样）</div>
+        <div class="status" id="snapStatus">先 Start servo（或标定），再 Capture（PWM 率采样）</div>
         <div class="scope-body">
           <aside class="telem-side">
             <div class="tree" id="snapTree"></div>

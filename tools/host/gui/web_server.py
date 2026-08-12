@@ -55,6 +55,7 @@ from xt_proto import (  # noqa: E402
     pack_cal_cogging,
     pack_enc_comp_clear,
     pack_servo,
+    pack_current,
     pack_info,
     pack_snap,
     pack_stop,
@@ -95,6 +96,7 @@ _MODE_NAMES = {
     0: "stop",
     1: "servo",
     2: "cal",
+    3: "current",
 }
 
 
@@ -659,9 +661,28 @@ class CanBridge:
         if op == "stop":
             return pack_stop(seq)
         if op == "servo":
+            def opt_float(key):
+                if key not in args or args.get(key) is None:
+                    return None
+                return float(args.get(key))
             return pack_servo(
                 float(args.get("omega_mech", 0)),
                 float(args.get("id", 0)),
+                seq,
+                position_rad=opt_float("position"),
+                stop_position_rad=opt_float("stop_position"),
+                max_torque_nm=opt_float("max_torque"),
+                feedforward_nm=float(args.get("feedforward", 0) or 0),
+                velocity_limit_rad_s=opt_float("velocity_limit"),
+                accel_limit_rad_s2=opt_float("accel_limit"),
+                kp_scale=float(args.get("kp_scale", 1.0) or 1.0),
+                kd_scale=float(args.get("kd_scale", 1.0) or 1.0),
+                ilimit_scale=float(args.get("ilimit_scale", 1.0) or 1.0),
+            )
+        if op == "current":
+            return pack_current(
+                float(args.get("id", 0)),
+                float(args.get("iq", 0)),
                 seq,
             )
         return pack_query(seq)
@@ -965,7 +986,7 @@ class CanBridge:
                 err = (
                     "snapshot rejected: "
                     f"status={ack.status}"
-                    + (" (start dq/vfoc first)" if ack.status == STATUS_NOT_RUN else "")
+                    + (" (start servo/cal first)" if ack.status == STATUS_NOT_RUN else "")
                 )
                 self.msglog.push("ERR", err)
                 return {"ok": False, "error": err, "status": ack.status}
@@ -1414,12 +1435,30 @@ def make_handler(bridge: CanBridge):
                     self._json(200, {"ok": True, "status": 0, "stream": "stop"})
                     return
                 if op == "servo":
-                    bridge.set_stream(
-                        "servo",
-                        omega_mech=float(req.get("omega_mech", 0)),
-                        id=float(req.get("id", 0)),
-                    )
+                    args = {
+                        "omega_mech": float(req.get("omega_mech", 0)),
+                        "id": float(req.get("id", 0)),
+                        "feedforward": float(req.get("feedforward", 0) or 0),
+                        "kp_scale": float(req.get("kp_scale", 1.0) or 1.0),
+                        "kd_scale": float(req.get("kd_scale", 1.0) or 1.0),
+                        "ilimit_scale": float(req.get("ilimit_scale", 1.0) or 1.0),
+                    }
+                    for key in (
+                        "position", "stop_position", "max_torque",
+                        "velocity_limit", "accel_limit",
+                    ):
+                        if key in req and req.get(key) is not None and str(req.get(key)) != "":
+                            args[key] = float(req.get(key))
+                    bridge.set_stream("servo", **args)
                     self._json(200, {"ok": True, "status": 0, "stream": "servo"})
+                    return
+                if op == "current":
+                    bridge.set_stream(
+                        "current",
+                        id=float(req.get("id", 0)),
+                        iq=float(req.get("iq", 0)),
+                    )
+                    self._json(200, {"ok": True, "status": 0, "stream": "current"})
                     return
                 if op == "cal_enc":
                     bridge.set_stream("query")

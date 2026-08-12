@@ -63,6 +63,12 @@ FLAG_ENC_MODE = 1 << 5
 MODE_STOP = 0
 MODE_SERVO = 1
 MODE_CAL = 2
+MODE_CURRENT = 3
+
+SERVO_CTRL_POSITION = 0
+SERVO_CTRL_CURRENT = 1
+# int32 sentinel for velocity mode (moteus position=NaN)
+POSITION_NAN_MRAD = -2147483648
 
 
 def cmd_id(node_id: int = 1) -> int:
@@ -105,15 +111,90 @@ def pack_snap(
     )
 
 
-def pack_servo(omega_mech_rad_s: float, id_a: float = 0.0, seq: int = 0) -> bytes:
-    """servo velocity: position=NaN + ω_mech [rad/s], optional Id."""
+def _rad_to_mrad_or_nan(value: float | None) -> int:
+    if value is None:
+        return POSITION_NAN_MRAD
+    return int(round(float(value) * 1000.0))
+
+
+def _scale_to_milli(scale: float | None, default: int = 1000) -> int:
+    if scale is None:
+        return default
+    return max(0, min(65535, int(round(float(scale) * 1000.0))))
+
+
+# ServoRequest wire size (after cmd byte): 48
+# control, reserved0, timeout_ms, 9*i32, 4*u16
+_SERVO_REQ_FMT = "<BBHiiiiiiiiiHHHH"
+_SERVO_CMD_FMT = "<B" + _SERVO_REQ_FMT[1:]  # cmd + request
+
+
+def pack_servo(
+    omega_mech_rad_s: float,
+    id_a: float = 0.0,
+    seq: int = 0,
+    position_rad: float | None = None,
+    stop_position_rad: float | None = None,
+    max_torque_nm: float | None = None,
+    feedforward_nm: float = 0.0,
+    velocity_limit_rad_s: float | None = None,
+    accel_limit_rad_s2: float | None = None,
+    kp_scale: float = 1.0,
+    kd_scale: float = 1.0,
+    ilimit_scale: float = 1.0,
+    timeout_ms: int = 0,
+) -> bytes:
+    """moteus-style kPosition servo via extended kCmdServo payload.
+
+    position_rad=None → velocity mode (position=NaN).
+    stop_position_rad=None → no stop clamp.
+    *_limit=None → firmware board defaults.
+    max_torque_nm=None/0 → firmware board default.
+    """
     return pack_header(TYPE_CMD, seq) + struct.pack(
-        "<Bii",
+        _SERVO_CMD_FMT,
         CMD_SERVO,
-        int(round(omega_mech_rad_s * 1000)),
-        int(round(id_a * 1000)),
+        SERVO_CTRL_POSITION,
+        0,  # reserved0
+        int(timeout_ms) & 0xFFFF,
+        _rad_to_mrad_or_nan(position_rad),
+        int(round(omega_mech_rad_s * 1000.0)),
+        int(round(id_a * 1000.0)),
+        0,
+        _rad_to_mrad_or_nan(stop_position_rad),
+        0 if max_torque_nm is None else int(round(max_torque_nm * 1000.0)),
+        int(round(feedforward_nm * 1000.0)),
+        _rad_to_mrad_or_nan(velocity_limit_rad_s),
+        _rad_to_mrad_or_nan(accel_limit_rad_s2),
+        _scale_to_milli(kp_scale),
+        _scale_to_milli(kd_scale),
+        _scale_to_milli(ilimit_scale),
+        0,
     )
 
+
+def pack_current(id_a: float, iq_a: float, seq: int = 0) -> bytes:
+    """Direct Id/Iq current mode via extended kCmdServo payload."""
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        _SERVO_CMD_FMT,
+        CMD_SERVO,
+        SERVO_CTRL_CURRENT,
+        0,
+        0,
+        0,
+        0,
+        int(round(id_a * 1000.0)),
+        int(round(iq_a * 1000.0)),
+        POSITION_NAN_MRAD,
+        0,
+        0,
+        POSITION_NAN_MRAD,
+        POSITION_NAN_MRAD,
+        1000,
+        1000,
+        1000,
+        0,
+    )
 
 
 def pack_cal_enc(

@@ -220,16 +220,17 @@ inline math::servo_mode::ServoMode::Options ServoModeOptions()
   }
   options.max_torque_Nm =
       options.torque_constant_Nm_A * options.max_iq_A;
-  // 0 disables the accel slew. Needed for host sine bandwidth tests
-  // (10 Hz × ±200 rad/s needs ~1.26e4 rad/s² peak). Re-enable a finite
-  // limit for gentle jog if desired.
-  options.acceleration_limit_rad_s2 = 0.0f;
   // Soften D when |ω_meas - ω_cmd| is small so encoder noise does not jitter Iq.
   options.velocity_threshold = 0.5f;
   // 200 rad/s is below the 48 V DQ voltage limit for this motor. Retain an
   // explicit ceiling so invalid host commands cannot accelerate without bound.
   options.max_velocity_cmd_rad_s =
       motor.fw_speed_rpm * (math::k2Pi / 60.0f);
+  // moteus-style defaults: velocity ceiling on, accel unlimited by default so
+  // host sine-velocity bandwidth tests stay undistorted. Position moves still
+  // get a velocity limit; GUI can pass an explicit accel_limit when desired.
+  options.default_velocity_limit_rad_s = options.max_velocity_cmd_rad_s;
+  options.default_accel_limit_rad_s2 = math::foc::QuietNan();
   options.max_position_slip_rad = math::kPi;
   // 0 disables velocity-slip reshape so a host sine command is not flattened
   // by the virtual trajectory. The command-side clamp still prevents the

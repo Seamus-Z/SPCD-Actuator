@@ -5,6 +5,7 @@
 #include "BL_Config.h"
 #include "board_config.h"
 #include "bootloader.h"
+#include "math/constants.h"
 #include "math/foc/transform.h"
 #include "stm32g4xx.h"
 
@@ -55,7 +56,8 @@ Application::Application(::pool::Pool* pool)
   binary_link_->SetCommandHandler(&Application::CommandThunk, this);
 }
 
-uint8_t Application::StartServo(float velocity_rad_s, float id_ref_A)
+uint8_t Application::StartServo(
+    const math::servo_mode::ServoMode::Command& command_in)
 {
   if (state_ != State::RUN || phase_pwm_->init_ok() == false)
   {
@@ -67,15 +69,29 @@ uint8_t Application::StartServo(float velocity_rad_s, float id_ref_A)
     return telemetry::xt_can::kStatusFail;
   }
 
-  const float omega_ref = velocity_rad_s;
-  const float id_ref = id_ref_A;
+  // Finite position/stop commands are single-turn [0, 2π). Map onto the nearest
+  // unwrapped target around the current PLL position so the outer loop still
+  // sees a continuous mechanical trajectory (shortest-path).
+  auto MapSingleTurnCommand = [this](float cmd_rad) -> float {
+    if (!math::foc::IsFinite(cmd_rad))
+    {
+      return cmd_rad;
+    }
+    const float cmd = math::WrapZeroToTwoPi(cmd_rad);
+    const float meas = encoder_.pll().position_rad();
+    return meas + math::WrapNegPiToPi(cmd - math::WrapZeroToTwoPi(meas));
+  };
+
+  math::servo_mode::ServoMode::Command command = command_in;
+  command.position_rad = MapSingleTurnCommand(command.position_rad);
+  command.stop_position_rad = MapSingleTurnCommand(command.stop_position_rad);
+
   if (mode_ == telemetry::xt_can::kModeServo &&
       servo_mode_.get() != nullptr && servo_mode_->active() &&
       foc_.get() != nullptr && foc_->active())
   {
-    servo_mode_->SetVelocity(omega_ref);
-    servo_mode_->SetIdRef(id_ref);
-    foc_->SetRefs(id_ref, foc_->iq_ref_A());
+    servo_mode_->SetCommand(command);
+    foc_->SetRefs(command.id_ref_A, foc_->iq_ref_A());
     foc_->SetOmega(encoder_.pll().omega_elec(),
                                   encoder_.pll().velocity_mech());
     return telemetry::xt_can::kStatusOk;
@@ -84,15 +100,17 @@ uint8_t Application::StartServo(float velocity_rad_s, float id_ref_A)
   dq_modulator_->Stop();
   phase_pwm_->DisableControlIsr();
 
-  // Servo policy: position=NaN selects velocity control.
   encoder_.SampleBlocking();
   encoder_.ResetPll();
-  servo_mode_->Start(math::foc::QuietNan(), omega_ref, id_ref);
+  // Remap after PLL reset so the first command is near the fresh unwrap.
+  command.position_rad = MapSingleTurnCommand(command_in.position_rad);
+  command.stop_position_rad = MapSingleTurnCommand(command_in.stop_position_rad);
+  servo_mode_->Start(command);
 
   const float theta_elec = encoder_.sample().electrical_rad;
   math::foc::FocController::Command cmd;
   cmd.theta_rad = theta_elec;
-  cmd.id_A = id_ref;
+  cmd.id_A = command.id_ref_A;
   cmd.iq_A = 0.0f;
   cmd.theta_rate_rad_s = 0.0f;
   foc_->Start(cmd);
@@ -117,6 +135,66 @@ uint8_t Application::StartServo(float velocity_rad_s, float id_ref_A)
   gate_driver_->PowerOn();
   pwm_output_on_ = true;
   mode_ = telemetry::xt_can::kModeServo;
+  StartControlIsr();
+  return telemetry::xt_can::kStatusOk;
+}
+
+uint8_t Application::StartCurrent(float id_A, float iq_A)
+{
+  if (state_ != State::RUN || phase_pwm_->init_ok() == false)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (!encoder_.valid() || foc_.get() == nullptr)
+  {
+    return telemetry::xt_can::kStatusFail;
+  }
+
+  if (mode_ == telemetry::xt_can::kModeCurrent && foc_->active())
+  {
+    foc_->SetRefs(id_A, iq_A);
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                   encoder_.pll().velocity_mech());
+    return telemetry::xt_can::kStatusOk;
+  }
+
+  if (servo_mode_.get() != nullptr)
+  {
+    servo_mode_->Stop();
+  }
+  dq_modulator_->Stop();
+  phase_pwm_->DisableControlIsr();
+
+  encoder_.SampleBlocking();
+  encoder_.ResetPll();
+
+  const float theta_elec = encoder_.sample().electrical_rad;
+  math::foc::FocController::Command cmd;
+  cmd.theta_rad = theta_elec;
+  cmd.id_A = id_A;
+  cmd.iq_A = iq_A;
+  cmd.theta_rate_rad_s = 0.0f;
+  foc_->Start(cmd);
+  foc_->SetOmega(encoder_.pll().omega_elec(),
+                 encoder_.pll().velocity_mech());
+
+  last_current_ = current_adc_->ReadLatest();
+  math::foc::FocController::Duties duties;
+  if (foc_->Step(0.0f, last_current_.i1_A,
+                 last_current_.i2_A,
+                 last_current_.i3_A, &duties,
+                 &theta_elec) == false)
+  {
+    foc_->Stop();
+    return telemetry::xt_can::kStatusFail;
+  }
+  id_A_ = foc_->id_A();
+  iq_A_ = foc_->iq_A();
+  dq_valid_ = last_current_.ok;
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  mode_ = telemetry::xt_can::kModeCurrent;
   StartControlIsr();
   return telemetry::xt_can::kStatusOk;
 }
@@ -309,13 +387,18 @@ void Application::ControlIsrStep()
   const bool vel_on =
       servo_mode_.get() != nullptr && servo_mode_->active() &&
       !bemf_on && !cogging_on;
+  const bool current_on =
+      mode_ == telemetry::xt_can::kModeCurrent &&
+      foc_.get() != nullptr && foc_->active() &&
+      !bemf_on && !cogging_on && !cal_on && !r_on && !l_on;
+
   if (phase_pwm_.get() == nullptr || current_adc_.get() == nullptr)
   {
     return;
   }
 
   const bool control_active =
-      vel_on || cal_on || bemf_on || r_on || l_on || cogging_on;
+      vel_on || current_on || cal_on || bemf_on || r_on || l_on || cogging_on;
 
   // Prefer measured ISR period. Nominal period_s() can disagree with real UEV
   // spacing; that scales PLL ω and makes vel PID think it is already tracking.
@@ -597,9 +680,40 @@ void Application::ControlIsrStep()
                           hal::PhasePwm::kDutyMinMilli);
     }
   }
+  else if (current_on)
+  {
+    // Direct Id/Iq current mode: encoder θ_e commutation, no outer servo.
+    if (!encoder_.valid() || !encoder_.pll().theta_valid())
+    {
+      foc_->Stop();
+      if (gate_driver_.get() != nullptr)
+      {
+        gate_driver_->PowerOff();
+      }
+      pwm_output_on_ = false;
+      dq_valid_ = false;
+      mode_ = telemetry::xt_can::kModeStop;
+      return;
+    }
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                            encoder_.pll().velocity_mech());
+    const float theta_elec = encoder_.pll().electrical_theta();
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+                             &duties, &theta_elec))
+    {
+      return;
+    }
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
+    dq_valid_ = sample.ok;
+    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    gate_driver_->PowerOn();
+    pwm_output_on_ = true;
+  }
   else if (vel_on)
   {
-    // moteus velocity mode: PID(position=NaN, ω) → Iq, encoder θ_e commutation.
+    // moteus position/velocity: PID → Iq, encoder θ_e commutation.
     if (!encoder_.valid() || !encoder_.pll().theta_valid())
     {
       servo_mode_->Stop();
@@ -709,7 +823,8 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncOk);
   }
   if (encoder_.valid() && encoder_.pll().theta_valid() &&
-      (mode_ == telemetry::xt_can::kModeServo))
+      (mode_ == telemetry::xt_can::kModeServo ||
+       mode_ == telemetry::xt_can::kModeCurrent))
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncMode);
   }
@@ -1039,7 +1154,8 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagEncOk);
   }
   if (encoder_.valid() && encoder_.pll().theta_valid() &&
-      (mode_ == telemetry::xt_can::kModeServo))
+      (mode_ == telemetry::xt_can::kModeServo ||
+       mode_ == telemetry::xt_can::kModeCurrent))
   {
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagEncMode);
   }

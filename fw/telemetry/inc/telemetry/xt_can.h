@@ -27,8 +27,8 @@ inline constexpr uint8_t kTypeCtrlReply = 9;
 inline constexpr uint8_t kCmdStop = 0;
 inline constexpr uint8_t kCmdInfo = 4;
 inline constexpr uint8_t kCmdSnap = 5;
-// Servo velocity command: velocity + d-axis reference. The FOC execution
-// path remains internal and is never exposed as a DQ or voltage mode.
+// Servo command: extended payload selects position/velocity or current.
+// See ServoRequest. FOC voltage/PWM modes remain internal (cal only).
 inline constexpr uint8_t kCmdServo = 6;
 // Calibration: subcmd + args (see CalRequest).
 inline constexpr uint8_t kCmdCal = 7;
@@ -39,8 +39,8 @@ inline constexpr uint8_t kCmdEncComp = 9;
 
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
-inline constexpr uint8_t kFwMinor = 4;
-inline constexpr uint8_t kFwPatch = 19;
+inline constexpr uint8_t kFwMinor = 6;
+inline constexpr uint8_t kFwPatch = 1;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -110,8 +110,15 @@ inline constexpr uint16_t kFlagEncOk = 1u << 4;
 inline constexpr uint16_t kFlagEncMode = 1u << 5;
 
 inline constexpr uint8_t kModeStop = 0;
-inline constexpr uint8_t kModeServo = 1;
+inline constexpr uint8_t kModeServo = 1;     // position or velocity (outer PID)
 inline constexpr uint8_t kModeCal = 2;
+inline constexpr uint8_t kModeCurrent = 3;   // direct Id/Iq current mode
+
+// kCmdServo payload.control
+inline constexpr uint8_t kServoCtrlPosition = 0;  // position/velocity PID → Iq
+inline constexpr uint8_t kServoCtrlCurrent = 1;   // direct Id/Iq
+// position_mrad sentinel: velocity tracking (moteus position=NaN).
+inline constexpr int32_t kPositionNanMrad = static_cast<int32_t>(0x80000000u);
 
 inline constexpr uint8_t kCalStateIdle = 0;
 inline constexpr uint8_t kCalStateSense = 1;
@@ -245,6 +252,38 @@ struct CtrlReply
   int32_t voltage_headroom_mV;
 } __attribute__((packed));
 
+// Host -> device: after cmd byte for kCmdServo.
+// moteus-style kPosition fields (plus control selector for current mode).
+// control=kServoCtrlPosition:
+//   position_mrad = kPositionNanMrad → no absolute target (velocity / stop).
+//   Finite position/stop are single-turn [0, 2π); firmware shortest-path maps.
+//   velocity_mrad_s = trajectory / hold velocity command.
+//   stop_position_mrad = kPositionNanMrad → none; else clamp trajectory.
+//   max_torque_mNm = 0 → board default.
+//   *_limit_mrad* = kPositionNanMrad → board default; negative → unlimited.
+//   *_scale_milli = 0 → 1000 (1.0).
+// control=kServoCtrlCurrent:
+//   id_mA / iq_mA are the FOC references; position fields ignored.
+struct ServoRequest
+{
+  uint8_t control;     // kServoCtrl*
+  uint8_t reserved0;
+  uint16_t timeout_ms; // reserved for future position-timeout policy
+  int32_t position_mrad;
+  int32_t velocity_mrad_s;
+  int32_t id_mA;
+  int32_t iq_mA;
+  int32_t stop_position_mrad;
+  int32_t max_torque_mNm;
+  int32_t feedforward_mNm;
+  int32_t velocity_limit_mrad_s;
+  int32_t accel_limit_mrad_s2;
+  uint16_t kp_scale_milli;
+  uint16_t kd_scale_milli;
+  uint16_t ilimit_scale_milli;
+  uint16_t reserved1;
+} __attribute__((packed));
+
 // Host -> device: after cmd byte for kCmdEncComp.
 // Chunk write: op=Chunk, chunk=0..7, data[32]
 // Commit: op=Commit, scale_urad = peak|corr| in microradians (scale = peak/127)
@@ -325,6 +364,7 @@ static_assert(sizeof(Telemetry) == 60, "Telemetry size");
 static_assert(sizeof(EncTelem) == 18, "EncTelem size");
 // Original 56-byte reply plus command ω, electrical ω, and voltage headroom.
 static_assert(sizeof(CtrlReply) == 64, "CtrlReply size");
+static_assert(sizeof(ServoRequest) == 48, "ServoRequest size");
 static_assert(sizeof(CalRequest) == 10, "CalRequest size");
 // hdr4 + kind1 + state1 + pm2 + offset4 + resid4 + sign1 + ok1 + samples2 = 20
 static_assert(sizeof(CalTelem) == 20, "CalTelem size");

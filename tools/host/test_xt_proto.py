@@ -74,25 +74,81 @@ class CalibrationProtocolTest(unittest.TestCase):
         self.assertEqual(result.sample_count, 240)
 
 class ServoCommandProtocolTest(unittest.TestCase):
+    _FMT = "<BBBBBBBHiiiiiiiiiHHHH"
+
     def test_pack_servo_uses_velocity_and_d_axis_current(self):
         frame = xt_proto.pack_servo(12.345, -0.678, seq=7)
         self.assertEqual(
-            struct.unpack("<BBBBBii", frame),
+            struct.unpack(self._FMT, frame),
             (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 7,
-             xt_proto.CMD_SERVO, 12_345, -678),
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_POSITION, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, 12_345, -678, 0,
+             xt_proto.POSITION_NAN_MRAD, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, xt_proto.POSITION_NAN_MRAD,
+             1000, 1000, 1000, 0),
+        )
+
+    def test_pack_servo_position_mode(self):
+        frame = xt_proto.pack_servo(
+            1.5, 0.25, seq=3, position_rad=0.5, stop_position_rad=1.0,
+            max_torque_nm=0.4, feedforward_nm=0.01,
+            velocity_limit_rad_s=30.0, accel_limit_rad_s2=80.0,
+            kp_scale=1.5, kd_scale=0.5, ilimit_scale=0.0,
+        )
+        self.assertEqual(
+            struct.unpack(self._FMT, frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 3,
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_POSITION, 0, 0,
+             500, 1500, 250, 0,
+             1000, 400, 10,
+             30000, 80000,
+             1500, 500, 0, 0),
+        )
+
+    def test_pack_current_mode(self):
+        frame = xt_proto.pack_current(0.5, -1.25, seq=9)
+        self.assertEqual(
+            struct.unpack(self._FMT, frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 9,
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_CURRENT, 0, 0,
+             0, 0, 500, -1250,
+             xt_proto.POSITION_NAN_MRAD, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, xt_proto.POSITION_NAN_MRAD,
+             1000, 1000, 1000, 0),
         )
 
 
 class GuiControlStreamTest(unittest.TestCase):
+    _FMT = "<BBBBBBBHiiiiiiiiiHHHH"
+
     def test_servo_stream_packs_a_servo_command(self):
         bridge = object.__new__(CanBridge)
         frame = bridge._pack_stream_frame(
             "servo", {"omega_mech": 12.345, "id": -0.678}, seq=7
         )
         self.assertEqual(
-            struct.unpack("<BBBBBii", frame),
+            struct.unpack(self._FMT, frame),
             (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 7,
-             xt_proto.CMD_SERVO, 12_345, -678),
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_POSITION, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, 12_345, -678, 0,
+             xt_proto.POSITION_NAN_MRAD, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, xt_proto.POSITION_NAN_MRAD,
+             1000, 1000, 1000, 0),
+        )
+
+    def test_current_stream_packs_a_current_command(self):
+        bridge = object.__new__(CanBridge)
+        frame = bridge._pack_stream_frame(
+            "current", {"id": 0.5, "iq": -1.25}, seq=8
+        )
+        self.assertEqual(
+            struct.unpack(self._FMT, frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 8,
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_CURRENT, 0, 0,
+             0, 0, 500, -1250,
+             xt_proto.POSITION_NAN_MRAD, 0, 0,
+             xt_proto.POSITION_NAN_MRAD, xt_proto.POSITION_NAN_MRAD,
+             1000, 1000, 1000, 0),
         )
 
 

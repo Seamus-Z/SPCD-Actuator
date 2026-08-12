@@ -97,15 +97,98 @@ uint8_t Application::HandleQuery()
 
 uint8_t Application::HandleServo(const uint8_t* payload, size_t payload_len)
 {
-  int32_t velocity_mrad_s = 0;
-  int32_t id_mA = 0;
-  if (NotReadI32(payload, payload_len, 0, &velocity_mrad_s) ||
-      NotReadI32(payload, payload_len, 4, &id_mA))
+  auto MilliScale = [](uint16_t milli) -> float {
+    return (milli == 0) ? 1.0f : (static_cast<float>(milli) * 0.001f);
+  };
+  auto DecodeMaybeRad = [](int32_t mrad) -> float {
+    return (mrad == telemetry::xt_can::kPositionNanMrad)
+               ? math::foc::QuietNan()
+               : static_cast<float>(mrad) * 0.001f;
+  };
+
+  // Legacy 8-byte payload: velocity_mrad_s + id_mA → velocity mode.
+  if (payload_len == 8)
+  {
+    int32_t velocity_mrad_s = 0;
+    int32_t id_mA = 0;
+    if (NotReadI32(payload, payload_len, 0, &velocity_mrad_s) ||
+        NotReadI32(payload, payload_len, 4, &id_mA))
+    {
+      return telemetry::xt_can::kStatusBadLen;
+    }
+    math::servo_mode::ServoMode::Command command{};
+    command.position_rad = math::foc::QuietNan();
+    command.velocity_rad_s = static_cast<float>(velocity_mrad_s) * 0.001f;
+    command.id_ref_A = MilliToAmps(id_mA);
+    return this->StartServo(command);
+  }
+
+  // Legacy 20-byte ServoRequest (control + pad3 + pos/vel/id/iq).
+  if (payload_len == 20)
+  {
+    if (payload == nullptr)
+    {
+      return telemetry::xt_can::kStatusBadLen;
+    }
+    const uint8_t control = payload[0];
+    int32_t position_mrad = 0;
+    int32_t velocity_mrad_s = 0;
+    int32_t id_mA = 0;
+    int32_t iq_mA = 0;
+    if (NotReadI32(payload, payload_len, 4, &position_mrad) ||
+        NotReadI32(payload, payload_len, 8, &velocity_mrad_s) ||
+        NotReadI32(payload, payload_len, 12, &id_mA) ||
+        NotReadI32(payload, payload_len, 16, &iq_mA))
+    {
+      return telemetry::xt_can::kStatusBadLen;
+    }
+    if (control == telemetry::xt_can::kServoCtrlCurrent)
+    {
+      return this->StartCurrent(MilliToAmps(id_mA), MilliToAmps(iq_mA));
+    }
+    if (control != telemetry::xt_can::kServoCtrlPosition)
+    {
+      return telemetry::xt_can::kStatusBadCmd;
+    }
+    math::servo_mode::ServoMode::Command command{};
+    command.position_rad = DecodeMaybeRad(position_mrad);
+    command.velocity_rad_s = static_cast<float>(velocity_mrad_s) * 0.001f;
+    command.id_ref_A = MilliToAmps(id_mA);
+    return this->StartServo(command);
+  }
+
+  if (payload == nullptr ||
+      payload_len < sizeof(telemetry::xt_can::ServoRequest))
   {
     return telemetry::xt_can::kStatusBadLen;
   }
-  return this->StartServo(static_cast<float>(velocity_mrad_s) * 0.001f,
-                           MilliToAmps(id_mA));
+
+  telemetry::xt_can::ServoRequest req{};
+  std::memcpy(&req, payload, sizeof(req));
+  if (req.control == telemetry::xt_can::kServoCtrlCurrent)
+  {
+    return this->StartCurrent(MilliToAmps(req.id_mA), MilliToAmps(req.iq_mA));
+  }
+  if (req.control != telemetry::xt_can::kServoCtrlPosition)
+  {
+    return telemetry::xt_can::kStatusBadCmd;
+  }
+
+  math::servo_mode::ServoMode::Command command{};
+  command.position_rad = DecodeMaybeRad(req.position_mrad);
+  command.velocity_rad_s = static_cast<float>(req.velocity_mrad_s) * 0.001f;
+  command.stop_position_rad = DecodeMaybeRad(req.stop_position_mrad);
+  command.max_torque_Nm = (req.max_torque_mNm <= 0)
+                              ? math::foc::QuietNan()
+                              : static_cast<float>(req.max_torque_mNm) * 0.001f;
+  command.feedforward_Nm = static_cast<float>(req.feedforward_mNm) * 0.001f;
+  command.velocity_limit_rad_s = DecodeMaybeRad(req.velocity_limit_mrad_s);
+  command.accel_limit_rad_s2 = DecodeMaybeRad(req.accel_limit_mrad_s2);
+  command.kp_scale = MilliScale(req.kp_scale_milli);
+  command.kd_scale = MilliScale(req.kd_scale_milli);
+  command.ilimit_scale = MilliScale(req.ilimit_scale_milli);
+  command.id_ref_A = MilliToAmps(req.id_mA);
+  return this->StartServo(command);
 }
 
 uint8_t Application::HandleEncComp(const uint8_t* payload,

@@ -1,31 +1,26 @@
 /* Scope UI: telemetry tree + signal quality (PlotJuggler / Foxglove style). */
-const modeNames = ["stop", "servo", "cal"];
+const modeNames = ["stop", "servo", "cal", "current"];
 const MAX_POINTS = 2000;
 
+// Live scope mirrors CtrlReply fields only (free-running Telemetry is retired).
+// Phase currents I1/I2/I3 and PWM duties are Snapshot-only, not Live.
 const CHANNELS = [
   { key: "id_a", label: "Id", path: "current/Id", color: "#5ec4a0", unit: "A", on: true, group: "current" },
   { key: "iq_a", label: "Iq", path: "current/Iq", color: "#e0b35a", unit: "A", on: true, group: "current" },
   { key: "idref_a", label: "Idref", path: "current/Idref", color: "#5a6a88", unit: "A", on: true, group: "current" },
   { key: "iqref_a", label: "Iqref", path: "current/Iqref", color: "#7a5a88", unit: "A", on: true, group: "current" },
-  { key: "i1_a", label: "I1", path: "current/I1", color: "#6aa6ff", unit: "A", on: false, group: "current" },
-  { key: "i2_a", label: "I2", path: "current/I2", color: "#4ec3e0", unit: "A", on: false, group: "current" },
-  { key: "i3_a", label: "I3", path: "current/I3", color: "#3db8a0", unit: "A", on: false, group: "current" },
   { key: "vd_v", label: "Vd", path: "voltage/Vd", color: "#c47ad0", unit: "V", on: false, group: "voltage" },
   { key: "vq_v", label: "Vq", path: "voltage/Vq", color: "#d08a6a", unit: "V", on: false, group: "voltage" },
   { key: "bus_v", label: "Vbus", path: "voltage/Vbus", color: "#e08a8a", unit: "V", on: false, group: "voltage" },
   { key: "voltage_headroom_v", label: "Vheadroom", path: "voltage/headroom", color: "#80c0c8", unit: "V", on: false, group: "voltage" },
-  { key: "theta_rad", label: "theta", path: "motion/theta", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
-  { key: "omega_rad_s", label: "omegaMeas", path: "motion/omega", color: "#88b0d0", unit: "rad/s", on: true, group: "motion" },
+  { key: "theta_rad", label: "thetaElec", path: "motion/theta_elec", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
+  { key: "omega_rad_s", label: "omegaMeas", path: "motion/omega_mech", color: "#88b0d0", unit: "rad/s", on: true, group: "motion" },
   { key: "omega_cmd_rad_s", label: "omegaCmd", path: "motion/omega_cmd", color: "#d0a088", unit: "rad/s", on: true, group: "motion" },
   { key: "omega_elec_rad_s", label: "omegaElec", path: "motion/omega_elec", color: "#7098c0", unit: "rad/s", on: false, group: "motion" },
   { key: "enc_raw", label: "encRaw", path: "encoder/raw", color: "#c0d088", unit: "", on: true, group: "encoder" },
   { key: "enc_spike", label: "encSpike", path: "encoder/spike", color: "#ff7a7a", unit: "", on: true, group: "encoder" },
-
   { key: "enc_theta_mech_rad", label: "encMech", path: "encoder/theta_mech", color: "#a8c070", unit: "rad", on: true, group: "encoder" },
   { key: "enc_theta_elec_rad", label: "encElec", path: "encoder/theta_elec", color: "#88b060", unit: "rad", on: true, group: "encoder" },
-  { key: "duty_a", label: "dutyA", path: "pwm/dutyA", color: "#b8c0d0", unit: "", on: false, group: "pwm" },
-  { key: "duty_b", label: "dutyB", path: "pwm/dutyB", color: "#98a0b0", unit: "", on: false, group: "pwm" },
-  { key: "duty_c", label: "dutyC", path: "pwm/dutyC", color: "#788090", unit: "", on: false, group: "pwm" },
 ];
 
 const GROUPS = [
@@ -33,7 +28,6 @@ const GROUPS = [
   { id: "voltage", label: "Voltage" },
   { id: "motion", label: "Motion" },
   { id: "encoder", label: "Encoder" },
-  { id: "pwm", label: "PWM" },
 ];
 
 const hist = { t: [] };
@@ -717,14 +711,77 @@ async function postCmd(body) {
 }
 
 document.getElementById("btnStop").onclick = () => postCmd({ op: "stop" });
+function wrapTwoPi(value) {
+  const twoPi = Math.PI * 2;
+  let x = Number(value) % twoPi;
+  if (x < 0) x += twoPi;
+  return x;
+}
+function wrapNegPiToPi(value) {
+  const twoPi = Math.PI * 2;
+  let x = ((Number(value) + Math.PI) % twoPi + twoPi) % twoPi - Math.PI;
+  return x;
+}
+function optionalNumber(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const raw = (el.value || "").trim();
+  if (raw === "" || !Number.isFinite(Number(raw))) return null;
+  return Number(raw);
+}
 document.getElementById("btnVel").onclick = () => {
   const input = document.getElementById("omegaMech");
   const omega = Math.max(-200, Math.min(200, Number(input.value)));
   input.value = String(omega);
-  postCmd({
+  const body = {
     op: "servo",
     omega_mech: omega,
     id: Number(document.getElementById("idA").value),
+    feedforward: Number(document.getElementById("feedforwardNm").value || 0),
+    kp_scale: Number(document.getElementById("kpScale").value || 1),
+    kd_scale: Number(document.getElementById("kdScale").value || 1),
+    ilimit_scale: Number(document.getElementById("ilimitScale").value || 1),
+  };
+  const posEl = document.getElementById("positionMech");
+  const posRaw = (posEl.value || "").trim();
+  const hasPos = posRaw !== "" && Number.isFinite(Number(posRaw));
+  if (hasPos) {
+    // Follow commanded ω until the target, then stop (moteus velocity+stop_position).
+    // This is NOT "position target + velocity_limit"; that felt like a teleport on short moves.
+    const target = wrapTwoPi(posRaw);
+    posEl.value = String(target);
+    const speed = Math.abs(omega);
+    if (speed < 1e-6) {
+      body.position = target;
+      body.omega_mech = 0;
+    } else {
+      const current = Number(latestVals.enc_theta_mech_rad);
+      const err = Number.isFinite(current) ? wrapNegPiToPi(target - current) : 0;
+      const dir = err === 0 ? (Math.sign(omega) || 1) : Math.sign(err);
+      body.omega_mech = dir * speed;
+      body.stop_position = target;
+    }
+  }
+  const stopEl = document.getElementById("stopPositionMech");
+  const stopRaw = (stopEl.value || "").trim();
+  if (!hasPos && stopRaw !== "" && Number.isFinite(Number(stopRaw))) {
+    const stop = wrapTwoPi(stopRaw);
+    stopEl.value = String(stop);
+    body.stop_position = stop;
+  }
+  const maxTorque = optionalNumber("maxTorqueNm");
+  if (maxTorque !== null) body.max_torque = maxTorque;
+  const velLimit = optionalNumber("velocityLimit");
+  if (velLimit !== null) body.velocity_limit = velLimit;
+  const accelLimit = optionalNumber("accelLimit");
+  if (accelLimit !== null) body.accel_limit = accelLimit;
+  postCmd(body);
+};
+document.getElementById("btnCurrent").onclick = () => {
+  postCmd({
+    op: "current",
+    id: Number(document.getElementById("idA").value),
+    iq: Number(document.getElementById("iqA").value),
   });
 };
 
@@ -1136,14 +1193,6 @@ function updateCalPanel(t) {
     box.classList.remove("cal-good", "cal-warn", "cal-bad");
   }
 }
-
-document.getElementById("btnVfoc").onclick = () =>
-  postCmd({
-    op: "vfoc",
-    theta: 0,
-    v: Number(document.getElementById("vfocV").value),
-    omega: Number(document.getElementById("omega").value),
-  });
 
 async function tickTelem() {
   if (telemInflight) return;
