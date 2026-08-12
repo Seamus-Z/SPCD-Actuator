@@ -4,6 +4,7 @@
 
 #include "BL_Config.h"
 #include "board_config.h"
+#include "nvs/runtime_config_store.h"
 #include "bootloader.h"
 #include "math/constants.h"
 #include "math/foc/transform.h"
@@ -251,6 +252,17 @@ bool Application::Init()
 
   // Sensor faults are non-fatal at boot; closed-loop modes require encoder_.valid().
   (void)encoder_.Init();
+
+  // Board defaults -> optional runtime Flash -> (if empty) seed Motor from cal
+  // Flash electricals -> Apply Config -> load cal encoder tables only.
+  // Config Motor table owns R/L/Ke for FOC; cal no longer overrides them.
+  FillDefaultRuntimeConfig();
+  runtime_config_flash_valid_ = nvs::RuntimeConfigStore::Load(&runtime_config_);
+  if (!runtime_config_flash_valid_)
+  {
+    SeedMotorElectricalFromCalFlash();
+  }
+  ApplyRuntimeConfig();
   (void)calibration_.LoadPersistentConfig();
 
   telem_last_us_ = timer_->read_us();
@@ -544,6 +556,7 @@ void Application::ControlIsrStep()
       if (calibration_.bemf().state() == math::calibration::BemfIdentCal::State::Done)
       {
         calibration_.ApplyBemfResult();
+        SyncMotorConfFromBemfCal();
       }
       servo_mode_->Stop();
       foc_->Stop();
@@ -577,6 +590,7 @@ void Application::ControlIsrStep()
       if (calibration_.resistance().state() == math::calibration::RIdentCal::State::Done)
       {
         calibration_.ApplyResistanceResult();
+        SyncMotorConfFromResistanceCal();
       }
       foc_->Stop();
       gate_driver_->PowerOff();
@@ -607,6 +621,7 @@ void Application::ControlIsrStep()
       if (calibration_.inductance().state() == math::calibration::LIdentCal::State::Done)
       {
         calibration_.ApplyInductanceResult();
+        SyncMotorConfFromInductanceCal();
       }
       dq_modulator_->Stop();
       gate_driver_->PowerOff();
@@ -851,7 +866,7 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
       t.theta_mrad = static_cast<int32_t>(foc_->theta_rad() * 1000.0f);
       t.omega_mrad_s = static_cast<int32_t>(
           foc_->theta_rate_rad_s() /
-          board::MotorParams().pole_pairs * 1000.0f);
+          PolePairs() * 1000.0f);
     }
     t.vd_mV = static_cast<int32_t>(foc_->vd_V() * 1000.0f);
     t.vq_mV = static_cast<int32_t>(foc_->vq_V() * 1000.0f);
@@ -862,7 +877,7 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
     t.theta_mrad = static_cast<int32_t>(dq_modulator_->theta_rad() * 1000.0f);
     t.omega_mrad_s = static_cast<int32_t>(
         dq_modulator_->theta_rate_rad_s() /
-        board::MotorParams().pole_pairs * 1000.0f);
+        PolePairs() * 1000.0f);
     t.vd_mV = static_cast<int32_t>(dq_modulator_->voltage_V() * 1000.0f);
     t.vq_mV = 0;
     t.bus_mV = static_cast<uint16_t>(dq_modulator_->bus_V() * 1000.0f + 0.5f);
@@ -1230,13 +1245,13 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   {
     r.omega_cmd_mrad_s =
         static_cast<int32_t>(foc_->theta_rate_rad_s() /
-                             board::MotorParams().pole_pairs * 1000.0f);
+                             PolePairs() * 1000.0f);
   }
   else if (dq_modulator_.get() != nullptr && dq_modulator_->active())
   {
     r.omega_cmd_mrad_s =
         static_cast<int32_t>(dq_modulator_->theta_rate_rad_s() /
-                             board::MotorParams().pole_pairs * 1000.0f);
+                             PolePairs() * 1000.0f);
   }
   if (encoder_.valid() && encoder_.pll().theta_valid())
   {
@@ -1312,6 +1327,220 @@ void Application::EnterBootloaderMode()
     DelayNops(200000);
   }
   EnterBootloader();
+}
+
+
+float Application::PolePairs() const
+{
+  return runtime_config_.motor.pole_pairs;
+}
+
+void Application::SeedMotorElectricalFromCalFlash()
+{
+  nvs::MotorConfig cal{};
+  if (!nvs::MotorConfigStore::Load(&cal))
+  {
+    return;
+  }
+  if (cal.resistance_valid && cal.resistance_ohm > 0.001f)
+  {
+    runtime_config_.motor.resistance_ohm = cal.resistance_ohm;
+  }
+  if (cal.inductance_valid)
+  {
+    float l = 0.0f;
+    if (cal.inductance_d_H > 0.0f && cal.inductance_q_H > 0.0f)
+    {
+      l = 0.5f * (cal.inductance_d_H + cal.inductance_q_H);
+    }
+    else if (cal.inductance_d_H > 0.0f)
+    {
+      l = cal.inductance_d_H;
+    }
+    else
+    {
+      l = cal.inductance_q_H;
+    }
+    if (l > 0.0f)
+    {
+      runtime_config_.motor.inductance_H = l;
+    }
+  }
+  if (cal.bemf_valid && cal.bemf_v_per_hz > 0.005f)
+  {
+    runtime_config_.motor.bemf_Vpeak_per_krpm =
+        board::BemfVpeakPerKrpmFromDqKe(cal.bemf_v_per_hz);
+  }
+}
+
+void Application::SyncMotorConfFromResistanceCal()
+{
+  const auto& result = calibration_.resistance().result();
+  if (!result.ok || result.resistance_ohm <= 0.001f)
+  {
+    return;
+  }
+  runtime_config_.motor.resistance_ohm = result.resistance_ohm;
+}
+
+void Application::SyncMotorConfFromInductanceCal()
+{
+  const auto& result = calibration_.inductance().result();
+  if (!result.ok || result.inductance_d_H <= 0.0f ||
+      result.inductance_q_H <= 0.0f)
+  {
+    return;
+  }
+  // Motor table has a single L; FOC already holds Ld/Lq from ApplyInductanceResult.
+  runtime_config_.motor.inductance_H =
+      0.5f * (result.inductance_d_H + result.inductance_q_H);
+}
+
+void Application::SyncMotorConfFromBemfCal()
+{
+  const auto& result = calibration_.bemf().result();
+  if (!result.ok || result.ke_v_s_per_rad <= 0.005f)
+  {
+    return;
+  }
+  runtime_config_.motor.bemf_Vpeak_per_krpm =
+      board::BemfVpeakPerKrpmFromDqKe(result.ke_v_s_per_rad);
+}
+
+void Application::FillDefaultRuntimeConfig()
+{
+  const auto& motor = board::MotorParams();
+  runtime_config_.motor.pole_pairs = motor.pole_pairs;
+  runtime_config_.motor.resistance_ohm = motor.phase_resistance_ohm;
+  runtime_config_.motor.inductance_H = motor.phase_inductance_H;
+  runtime_config_.motor.bemf_Vpeak_per_krpm = motor.bemf_Vpeak_per_krpm;
+  runtime_config_.motor.max_phase_current_A = motor.max_phase_current_A;
+  runtime_config_.motor.fw_speed_rad_s =
+      motor.fw_speed_rpm * (math::k2Pi / 60.0f);
+  runtime_config_.motor.bus_V = board::kBusVoltage_V;
+  runtime_config_.motor.reserved0 = 0.0f;
+
+  runtime_config_.foc.bandwidth_hz = 200.0f;
+  runtime_config_.foc.bemf_feedforward = 1.0f;
+  runtime_config_.foc.current_feedforward = 1.0f;
+  runtime_config_.foc.cross_coupling_feedforward = 1.0f;
+  runtime_config_.foc.max_current_desired_rate_A_s = 10000.0f;
+  runtime_config_.foc.reserved0 = 0.0f;
+
+  const auto servo = board::ServoModeOptions();
+  runtime_config_.servo.kp = servo.pid.kp;
+  runtime_config_.servo.ki = servo.pid.ki;
+  runtime_config_.servo.kd = servo.pid.kd;
+  runtime_config_.servo.ilimit = servo.pid.ilimit;
+  runtime_config_.servo.max_iq_A = servo.max_iq_A;
+  runtime_config_.servo.velocity_threshold = servo.velocity_threshold;
+  runtime_config_.servo.max_position_slip_rad = servo.max_position_slip_rad;
+  runtime_config_.servo.max_velocity_error_rad_s = servo.max_velocity_error_rad_s;
+  runtime_config_.servo.default_velocity_limit_rad_s =
+      servo.default_velocity_limit_rad_s;
+  runtime_config_.servo.default_accel_limit_rad_s2 =
+      servo.default_accel_limit_rad_s2;
+  runtime_config_.servo.sign_f = (servo.pid.sign < 0) ? -1.0f : 1.0f;
+  runtime_config_.servo.reserved0 = 0.0f;
+
+  runtime_config_.encoder.pll_filter_hz = 400.0f;
+  runtime_config_.encoder.spike_error_rad = 0.15f;
+  runtime_config_.encoder.filter_us =
+      static_cast<float>(board::Ma600Options().filter_us);
+  runtime_config_.encoder.reserved0 = 0.0f;
+}
+
+void Application::ApplyRuntimeConfig()
+{
+  auto& motor = runtime_config_.motor;
+  auto& foc_c = runtime_config_.foc;
+  auto& servo_c = runtime_config_.servo;
+  auto& enc_c = runtime_config_.encoder;
+
+  if (motor.pole_pairs < 1.0f) motor.pole_pairs = 1.0f;
+  if (motor.resistance_ohm < 0.001f) motor.resistance_ohm = 0.001f;
+  if (motor.inductance_H < 1.0e-7f) motor.inductance_H = 1.0e-7f;
+  if (motor.max_phase_current_A < 0.1f) motor.max_phase_current_A = 0.1f;
+  if (motor.fw_speed_rad_s < 1.0f) motor.fw_speed_rad_s = 1.0f;
+  if (motor.bus_V < 1.0f) motor.bus_V = 1.0f;
+  if (foc_c.bandwidth_hz < 1.0f) foc_c.bandwidth_hz = 1.0f;
+  if (enc_c.pll_filter_hz < 1.0f) enc_c.pll_filter_hz = 1.0f;
+  if (enc_c.filter_us < 0.0f) enc_c.filter_us = 0.0f;
+  if (enc_c.filter_us > 10240.0f) enc_c.filter_us = 10240.0f;
+
+  const uint16_t filter_us =
+      static_cast<uint16_t>(enc_c.filter_us + 0.5f);
+  (void)encoder_.SetSensorFilterUs(filter_us);
+
+  math::servo_mode::EncoderPll::Options pll = board::EncoderPllOptions();
+  pll.pll_filter_hz = enc_c.pll_filter_hz;
+  pll.pole_pairs = motor.pole_pairs;
+  pll.spike_error_rad = enc_c.spike_error_rad;
+  pll.max_velocity_mech_rad_s = motor.fw_speed_rad_s * 1.5f;
+  encoder_.SetPllOptions(pll);
+
+  if (dq_modulator_.get() != nullptr)
+  {
+    dq_modulator_->SetBusVoltage(motor.bus_V);
+  }
+
+  if (foc_.get() != nullptr)
+  {
+    foc_->SetBusVoltage(motor.bus_V);
+    foc_->SetMaxCurrent(motor.max_phase_current_A);
+    foc_->SetFeedforwards(foc_c.bemf_feedforward, foc_c.current_feedforward,
+                          foc_c.cross_coupling_feedforward);
+    foc_->SetMaxCurrentDesiredRate(foc_c.max_current_desired_rate_A_s);
+    foc_->SetPhaseLead(1.5f / static_cast<float>(board::PhasePwmOptions().rate_hz) +
+                       static_cast<float>(filter_us) * 1.0e-6f);
+    foc_->SetResistanceInductance(motor.resistance_ohm, motor.inductance_H,
+                                  motor.inductance_H);
+    foc_->SetVPerHz(board::BemfVPerMechRadS(
+        [&]() {
+          device::motor::Params p = board::MotorParams();
+          p.bemf_Vpeak_per_krpm = motor.bemf_Vpeak_per_krpm;
+          p.phase_resistance_ohm = motor.resistance_ohm;
+          p.phase_inductance_H = motor.inductance_H;
+          p.pole_pairs = motor.pole_pairs;
+          p.max_phase_current_A = motor.max_phase_current_A;
+          return p;
+        }()));
+    // SetResistanceInductance preserves prior bandwidth; force configured Hz.
+    foc_->SetBandwidthHz(foc_c.bandwidth_hz);
+  }
+
+  if (servo_mode_.get() != nullptr)
+  {
+    auto opts = board::ServoModeOptions();
+    opts.pid.kp = servo_c.kp;
+    opts.pid.ki = servo_c.ki;
+    opts.pid.kd = servo_c.kd;
+    opts.pid.ilimit = servo_c.ilimit;
+    opts.pid.sign = (servo_c.sign_f < 0.0f) ? -1 : 1;
+    opts.max_iq_A = servo_c.max_iq_A;
+    if (opts.max_iq_A > motor.max_phase_current_A)
+    {
+      opts.max_iq_A = motor.max_phase_current_A;
+    }
+    opts.velocity_threshold = servo_c.velocity_threshold;
+    opts.max_position_slip_rad = servo_c.max_position_slip_rad;
+    opts.max_velocity_error_rad_s = servo_c.max_velocity_error_rad_s;
+    opts.default_velocity_limit_rad_s = servo_c.default_velocity_limit_rad_s;
+    opts.default_accel_limit_rad_s2 = servo_c.default_accel_limit_rad_s2;
+    opts.max_velocity_cmd_rad_s = motor.fw_speed_rad_s;
+    opts.torque_constant_Nm_A = board::VendorTorqueConstantNmPerA(
+        [&]() {
+          device::motor::Params p = board::MotorParams();
+          p.bemf_Vpeak_per_krpm = motor.bemf_Vpeak_per_krpm;
+          return p;
+        }());
+    if (opts.torque_constant_Nm_A < 0.05f)
+    {
+      opts.torque_constant_Nm_A = 0.1f;
+    }
+    opts.max_torque_Nm = opts.torque_constant_Nm_A * opts.max_iq_A;
+    servo_mode_->SetOptions(opts);
+  }
 }
 
 }  // namespace app

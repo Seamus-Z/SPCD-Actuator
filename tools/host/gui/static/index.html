@@ -11,12 +11,13 @@
     <div class="headerRow">
       <div>
         <h1>xtellar</h1>
-        <p>二进制 CAN-FD · Live 监控 / Snapshot 示波器</p>
+        <p>二进制 CAN-FD · Live / Snapshot / Cal / Config</p>
       </div>
       <nav class="modeBar" id="modeBar">
         <button type="button" class="modeBtn active" data-mode="live">Live</button>
         <button type="button" class="modeBtn" data-mode="snap">Snapshot</button>
         <button type="button" class="modeBtn" data-mode="cal">Cal</button>
+        <button type="button" class="modeBtn" data-mode="config">Config</button>
       </nav>
     </div>
   </header>
@@ -35,30 +36,43 @@
       </div>
       <div class="status" id="portStatus">not connected</div>
       <div class="status" id="motorStatus">电机未探测</div>
-      <pre class="infoBox" id="motorInfo"></pre>
 
       <h2 style="margin-top:1.2rem">Command</h2>
-      <label>Id (A)</label>
+      <label class="fieldLabel">Id (A)</label>
       <input id="idA" type="number" step="0.1" value="0" />
-      <label>Iq (A) — current mode</label>
+      <label class="fieldLabel">Iq (A)
+        <span class="tip" title="电流模式直接给定 Iq">!</span>
+      </label>
       <input id="iqA" type="number" step="0.1" value="0.5" />
-      <label>ω mech (rad/s) — 实际巡航速度 ±200</label>
-      <input id="omegaMech" type="number" step="1" min="-200" max="200" value="20" />
-      <label>position mech (rad) — 0~6.28；填了=按上面 ω 走到该点后停；留空=纯速度</label>
-      <input id="positionMech" type="number" step="0.1" min="0" max="6.28318530718" placeholder="0~6.28 or empty" />
-      <label>stop position (rad) — 仅速度模式可选；留空=无</label>
-      <input id="stopPositionMech" type="number" step="0.1" min="0" max="6.28318530718" placeholder="optional" />
-      <label>max torque (Nm) — 留空=板级默认</label>
+      <label class="fieldLabel">ω mech (rad/s)
+        <span class="tip" title="机械角速度命令。有 position 时作为巡航速度">!</span>
+      </label>
+      <input id="omegaMech" type="number" step="1" value="20" />
+      <label class="fieldLabel">position mech (rad)
+        <span class="tip" title="单圈目标。填写后按上面 ω 走到该点后停；留空=纯速度">!</span>
+      </label>
+      <input id="positionMech" type="number" step="0.1" placeholder="empty = velocity" />
+      <label class="fieldLabel">stop position (rad)
+        <span class="tip" title="仅速度模式可选硬终点；留空=无">!</span>
+      </label>
+      <input id="stopPositionMech" type="number" step="0.1" placeholder="optional" />
+      <label class="fieldLabel">max torque (Nm)
+        <span class="tip" title="留空使用 Config/Servo 默认">!</span>
+      </label>
       <input id="maxTorqueNm" type="number" step="0.05" min="0" placeholder="default" />
-      <label>feedforward (Nm)</label>
+      <label class="fieldLabel">feedforward (Nm)</label>
       <input id="feedforwardNm" type="number" step="0.01" value="0" />
       <details style="margin-top:0.6rem">
-        <summary>高级 moteus 参数</summary>
-        <label>velocity limit (rad/s) — 留空=默认</label>
+        <summary>高级参数</summary>
+        <label class="fieldLabel">velocity limit (rad/s)
+          <span class="tip" title="留空使用 Config/Servo 默认">!</span>
+        </label>
         <input id="velocityLimit" type="number" step="1" placeholder="default" />
-        <label>accel limit (rad/s²) — 留空=默认</label>
+        <label class="fieldLabel">accel limit (rad/s²)
+          <span class="tip" title="留空使用 Config/Servo 默认；NaN=不限">!</span>
+        </label>
         <input id="accelLimit" type="number" step="1" placeholder="default" />
-        <label>kp_scale / kd_scale / ilimit_scale</label>
+        <label class="fieldLabel">kp_scale / kd_scale / ilimit_scale</label>
         <div class="row">
           <input id="kpScale" type="number" step="0.1" value="1" />
           <input id="kdScale" type="number" step="0.1" value="1" />
@@ -116,7 +130,9 @@
             <label class="inlineChk">N <input id="snapN" type="number" min="32" max="512" step="32" value="512" style="width:4.5rem" /></label>
             <label class="inlineChk">dec <input id="snapDec" type="number" min="1" max="16" value="1" style="width:3rem" /></label>
             <button id="btnSnap" type="button">Capture</button>
-            <label class="inlineChk">ω <input id="snapOmega" type="number" step="1" value="200" style="width:4rem" title="当前机械转速 rad/s，用于对比期望电频率" /></label>
+            <label class="inlineChk">ω <input id="snapOmega" type="number" step="1" value="20" style="width:4rem" />
+              <span class="tip" title="分析时的机械转速，用于对比期望电频率">!</span>
+            </label>
             <button class="ghost" id="btnSnapAnalyze" type="button">分析</button>
             <button class="ghost" id="btnSnapExport" type="button">Export JSON</button>
             <button class="ghost" id="btnSnapAuto" type="button">Autoscale</button>
@@ -133,8 +149,10 @@
           </aside>
           <div class="canvas-wrap">
             <canvas id="snapPlot" width="1000" height="360"></canvas>
-            <div class="hint">默认 15 kHz × 512 点 · 通道 Id/Iq/I1/I2/I3</div>
-            <pre class="infoBox" id="snapAnalysis" style="margin-top:0.5rem">点击「分析」输出：各通道频率/幅值、i1+i2+i3 残差、dq/相频比</pre>
+            <div class="hint">通道 Id/Iq/I1/I2/I3 · PWM 率采样
+              <span class="tip" title="样本数/降采样由上方 N、dec 控制">!</span>
+            </div>
+            <pre class="infoBox" id="snapAnalysis" style="margin-top:0.5rem">点击「分析」查看频率/幅值与残差</pre>
           </div>
         </div>
       </section>
@@ -142,63 +160,79 @@
       
       <section class="panel" id="panelCal" hidden>
         <div class="plot-head">
-          <h2>标定 / 辨识</h2>
+          <h2>标定 / 辨识
+            <span class="tip" title="推荐顺序：R → Ld/Lq → 编码器转圈映射 → 几何补偿 → 齿槽 → Ke。结果写入标定 Flash，可在 Config 页查看。">!</span>
+          </h2>
         </div>
-        <p class="hint" style="margin-top:0">
-          参考 moteus：推荐顺序为 R → Ld/Lq → 编码器转圈映射 → 编码器几何补偿 → 齿槽 → Ke。
-          转圈映射会以恒定 D 轴电流正反各转两圈，并以受限加速度平滑换向；生成的 64 点周期换相补偿表会保存到 Flash NVS。
-          「编码器几何补偿」用恒速惯性法生成 256 点表，压磁环偏心/倾斜带来的 1/2 次速度纹波（对应 Live 上约 10% 慢正弦）。
-          DM4310 建议 40 elec rad/s、1.0 A 起步；固件将转圈速度限制为 80、校准电流限制为 2.0 A。
-          「锁定校准」只辨识单一全局 offset，用于低速诊断，不能替代转圈映射。
-        </p>
-        <label>标定方式</label>
+        <label class="fieldLabel">标定方式</label>
         <select id="calMethod">
-          <option value="spin">编码器转圈映射（64 点，推荐）</option>
-          <option value="lock">编码器锁定校准（仅全局 offset）</option>
-          <option value="r">R 相电阻辨识（电流扫描，无需编码器）</option>
-          <option value="l">Ld/Lq 电感辨识（电压阶跃，无需编码器）</option>
-          <option value="bemf">Ke 反电动势辨识（闭环速度扫描）</option>
-          <option value="cogging">齿槽补偿标定（慢速正反转映射，需先标编码器）</option>
-          <option value="enc_comp">编码器几何补偿（256 点，压 2/rev 纹波）</option>
+          <option value="spin">编码器转圈映射</option>
+          <option value="lock">编码器锁定校准</option>
+          <option value="r">R 相电阻辨识</option>
+          <option value="l">Ld/Lq 电感辨识</option>
+          <option value="bemf">Ke 反电动势辨识</option>
+          <option value="cogging">齿槽补偿标定</option>
+          <option value="enc_comp">编码器几何补偿</option>
         </select>
         <div id="calParamsEnc">
-          <label>校准电流 A（建议 1.0 A，最高 2.0 A）</label>
-          <input id="calCurrent" type="number" step="0.1" min="0.1" max="2.0" value="1.0" />
-          <label>转圈 |ω| elec (rad/s) — 建议 40，最高 80</label>
-          <input id="calOmega" type="number" step="1" min="1" max="80" value="40" />
+          <label class="fieldLabel">校准电流 A
+            <span class="tip" title="转圈/锁定校准的 D 轴对齐电流">!</span>
+          </label>
+          <input id="calCurrent" type="number" step="0.1" value="1.0" />
+          <label class="fieldLabel">转圈 |ω| elec (rad/s)
+            <span class="tip" title="仅转圈映射使用；锁定校准时忽略">!</span>
+          </label>
+          <input id="calOmega" type="number" step="1" value="40" />
         </div>
         <div id="calParamsBemf" hidden>
-          <label>扫描最高转速 ω mech (rad/s)</label>
+          <label class="fieldLabel">扫描最高转速 ω mech (rad/s)</label>
           <input id="calBemfMaxSpeed" type="number" step="1" value="60" />
-          <label>扫描点数（3～8，越多拟合越稳）</label>
-          <input id="calBemfPoints" type="number" step="1" min="3" max="8" value="5" />
+          <label class="fieldLabel">扫描点数
+            <span class="tip" title="点数越多拟合越稳">!</span>
+          </label>
+          <input id="calBemfPoints" type="number" step="1" value="5" />
         </div>
         <div id="calParamsR" hidden>
-          <label>扫描最大电流 A</label>
+          <label class="fieldLabel">扫描最大电流 A</label>
           <input id="calRMaxCurrent" type="number" step="0.1" value="1.5" />
-          <label>扫描点数（3～8，越多拟合越稳）</label>
-          <input id="calRPoints" type="number" step="1" min="3" max="8" value="5" />
+          <label class="fieldLabel">扫描点数
+            <span class="tip" title="点数越多拟合越稳">!</span>
+          </label>
+          <input id="calRPoints" type="number" step="1" value="5" />
         </div>
         <div id="calParamsL" hidden>
-          <label>D/Q 阶跃电压 V（叠加在 d 轴保持电压上）</label>
+          <label class="fieldLabel">D/Q 阶跃电压 V
+            <span class="tip" title="叠加在 d 轴保持电压上的阶跃幅度">!</span>
+          </label>
           <input id="calLStepVoltage" type="number" step="0.1" value="3.0" />
-          <label>每轴重复次数（3～8，依次测 Ld、Lq）</label>
-          <input id="calLTrials" type="number" step="1" min="3" max="8" value="5" />
+          <label class="fieldLabel">每轴重复次数
+            <span class="tip" title="依次测 Ld、Lq">!</span>
+          </label>
+          <input id="calLTrials" type="number" step="1" value="5" />
         </div>
         <div id="calParamsCogging" hidden>
-          <label>扫描速度 ω mech (rad/s)（要能顺畅转起来，建议 5，可到 10~60）</label>
-          <input id="calCoggingVelocity" type="number" step="0.5" min="0.5" value="5" />
-          <label>每方向记录圈数（越高越稳，建议 4；高速时加大）</label>
-          <input id="calCoggingRevs" type="number" step="1" min="1" value="4" />
+          <label class="fieldLabel">扫描速度 ω mech (rad/s)
+            <span class="tip" title="需先完成编码器标定；速度要能顺畅转动">!</span>
+          </label>
+          <input id="calCoggingVelocity" type="number" step="0.5" value="5" />
+          <label class="fieldLabel">每方向记录圈数
+            <span class="tip" title="越高越稳；高速时可加大">!</span>
+          </label>
+          <input id="calCoggingRevs" type="number" step="1" value="4" />
         </div>
         <div id="calParamsEncComp" hidden>
-          <label>恒速 ω mech (rad/s) — 建议 40~200（越高越不易混进 14/rev）</label>
-          <input id="calEncCompOmega" type="number" step="1" min="5" max="200" value="40" />
-          <label>采集时长 s（建议 8，至少转满 1 圈）</label>
-          <input id="calEncCompSeconds" type="number" step="1" min="2" max="30" value="8" />
-          <label>采集频率 Hz（主机发 vel / 收回报）</label>
-          <input id="calEncCompRate" type="number" step="10" min="50" max="500" value="200" />
-          <p class="hint">开始后电机会按设定速度转几秒，自动生成并写入 256 点补偿表。也可用上次 Snapshot。</p>
+          <label class="fieldLabel">恒速 ω mech (rad/s)
+            <span class="tip" title="压制磁环偏心/倾斜引起的速度纹波">!</span>
+          </label>
+          <input id="calEncCompOmega" type="number" step="1" value="40" />
+          <label class="fieldLabel">采集时长 s
+            <span class="tip" title="建议至少转满 1 圈">!</span>
+          </label>
+          <input id="calEncCompSeconds" type="number" step="1" value="8" />
+          <label class="fieldLabel">采集频率 Hz
+            <span class="tip" title="主机发速度命令 / 收回报的频率">!</span>
+          </label>
+          <input id="calEncCompRate" type="number" step="10" value="200" />
         </div>
         <div class="row" style="margin-top:0.8rem">
           <button id="btnCalStart" type="button">开始标定</button>
@@ -212,6 +246,99 @@
         </div>
         <div class="status" id="calVerdict">等待校准结果…</div>
         <pre class="infoBox" id="calResult">尚无结果</pre>
+      </section>
+
+
+      <section class="panel" id="panelConfig" hidden>
+        <div class="plot-head">
+          <h2>Runtime Config</h2>
+          <div class="row tight">
+            <button class="ghost" id="btnConfLoad" type="button">Load</button>
+            <button class="ghost" id="btnConfSave" type="button">Save</button>
+            <button class="ghost" id="btnConfDefaults" type="button">Defaults</button>
+            <button id="btnConfGet" type="button">Refresh (get)</button>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:0">
+          Runtime / Calibration Flash
+          <span class="tip" title="Refresh/Apply 读写板端 RAM；Load/Save 对应 Runtime Flash；Defaults 恢复板级默认。标定结果仍由 Cal 页写入独立 Flash，并覆盖名义 R/L/Ke。">!</span>
+        </p>
+        <div class="status" id="confStatus">idle</div>
+
+        <section class="confCard confCalCard" id="confCalStatus">
+          <div class="confCardHead">
+            <h3>Calibration Flash</h3>
+            <span class="tip" title="只读：来自标定 Flash 的持久化状态">!</span>
+          </div>
+          <div class="calFlags" id="confCalFlags">
+            <span class="calFlag" data-cal="encoder">Encoder</span>
+            <span class="calFlag" data-cal="resistance">R</span>
+            <span class="calFlag" data-cal="inductance">Ld/Lq</span>
+            <span class="calFlag" data-cal="bemf">Ke</span>
+            <span class="calFlag" data-cal="cogging">Cogging</span>
+            <span class="calFlag" data-cal="enc_comp">EncComp</span>
+          </div>
+          <pre class="infoBox" id="confCalValues">尚未读取</pre>
+        </section>
+
+        <div class="confGrid">
+          <section class="confCard" data-conf-group="motor">
+            <div class="confCardHead">
+              <h3>Motor</h3>
+              <button class="ghost" type="button" data-conf-apply="motor">Apply</button>
+            </div>
+            <label class="fieldLabel">pole_pairs <span class="tip" title="电气极对数">!</span><input data-conf="motor.pole_pairs" type="number" step="1" /></label>
+            <label class="fieldLabel">R (ohm) <span class="tip" title="Config Motor 真源。可手填 Apply，或由 R 标定写入；掉电保留需 Save">!</span><input data-conf="motor.R" type="number" step="0.01" /></label>
+            <label class="fieldLabel">L (H) <span class="tip" title="Config Motor 真源。L 标定写入 (Ld+Lq)/2；掉电保留需 Save">!</span><input data-conf="motor.L" type="number" step="0.00001" /></label>
+            <label class="fieldLabel">bemf_Vpeak_per_krpm <span class="tip" title="Config Motor 真源。可手填，或由 Ke 标定回写；掉电保留需 Save">!</span><input data-conf="motor.bemf_Vpeak_per_krpm" type="number" step="0.1" /></label>
+            <label class="fieldLabel">max_phase_current_A <span class="tip" title="相电流软限">!</span><input data-conf="motor.max_phase_current_A" type="number" step="0.1" /></label>
+            <label class="fieldLabel">fw_speed_rad_s <span class="tip" title="最大机械速度命令天花板">!</span><input data-conf="motor.fw_speed_rad_s" type="number" step="1" /></label>
+            <label class="fieldLabel">bus_V <span class="tip" title="名义母线电压（无母线 ADC 时用于调制）">!</span><input data-conf="motor.bus_V" type="number" step="0.1" /></label>
+          </section>
+
+          <section class="confCard" data-conf-group="foc">
+            <div class="confCardHead">
+              <h3>FOC</h3>
+              <button class="ghost" type="button" data-conf-apply="foc">Apply</button>
+            </div>
+            <label class="fieldLabel">bandwidth_hz <span class="tip" title="电流环目标带宽">!</span><input data-conf="foc.bandwidth_hz" type="number" step="1" /></label>
+            <label>bemf_ff<input data-conf="foc.bemf_ff" type="number" step="0.05" /></label>
+            <label>current_ff<input data-conf="foc.current_ff" type="number" step="0.05" /></label>
+            <label>cross_ff<input data-conf="foc.cross_ff" type="number" step="0.05" /></label>
+            <label class="fieldLabel">max_current_rate <span class="tip" title="电流参考斜率限">!</span><input data-conf="foc.max_current_rate" type="number" step="1" /></label>
+          </section>
+
+          <section class="confCard" data-conf-group="servo">
+            <div class="confCardHead">
+              <h3>Servo</h3>
+              <button class="ghost" type="button" data-conf-apply="servo">Apply</button>
+            </div>
+            <label>kp<input data-conf="servo.kp" type="number" step="0.01" /></label>
+            <label>ki<input data-conf="servo.ki" type="number" step="0.01" /></label>
+            <label>kd<input data-conf="servo.kd" type="number" step="0.01" /></label>
+            <label>ilimit<input data-conf="servo.ilimit" type="number" step="0.01" /></label>
+            <label>sign<input data-conf="servo.sign" type="number" step="1" /></label>
+            <label class="fieldLabel">max_iq <span class="tip" title="外环 Iq 限幅">!</span><input data-conf="servo.max_iq" type="number" step="0.1" /></label>
+            <label>vel_threshold<input data-conf="servo.vel_threshold" type="number" step="0.1" /></label>
+            <label class="fieldLabel">slip <span class="tip" title="位置滑差限">!</span><input data-conf="servo.slip" type="number" step="0.1" /></label>
+            <label>vel_err<input data-conf="servo.vel_err" type="number" step="0.1" /></label>
+            <label class="fieldLabel">default_vel_limit <span class="tip" title="轨迹默认速度限">!</span><input data-conf="servo.default_vel_limit" type="number" step="1" /></label>
+            <label class="fieldLabel">default_accel_limit
+              <span class="tip" title="留空 = NaN（不限加速度）">!</span>
+              <input data-conf="servo.default_accel_limit" type="number" step="1" placeholder="empty = NaN" />
+            </label>
+          </section>
+
+          <section class="confCard" data-conf-group="encoder">
+            <div class="confCardHead">
+              <h3>Encoder</h3>
+              <button class="ghost" type="button" data-conf-apply="encoder">Apply</button>
+            </div>
+            <label class="fieldLabel">pll_filter_hz <span class="tip" title="编码器 PLL 滤波截止">!</span><input data-conf="encoder.pll_filter_hz" type="number" step="1" /></label>
+            <label>spike_error_rad<input data-conf="encoder.spike_error_rad" type="number" step="0.01" /></label>
+            <label class="fieldLabel">filter_us <span class="tip" title="MA600 传感器滤波时间常数">!</span><input data-conf="encoder.filter_us" type="number" step="1" /></label>
+          </section>
+        </div>
       </section>
 
       <section class="panel log-panel">

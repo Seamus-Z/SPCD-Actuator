@@ -55,6 +55,7 @@ cc_binary(
         "//fw/middleware:encoder",
         "//fw/middleware:calibration",
         "//fw/nvs:encoder_cal_store",
+        "//fw/nvs:runtime_config_store",
         "//fw/pool:pool",
         "//fw/telemetry:binary_link",
         "//fw/bootloader:enter_bootloader",

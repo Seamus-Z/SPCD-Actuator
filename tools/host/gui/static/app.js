@@ -36,7 +36,7 @@ for (const ch of CHANNELS) hist[ch.key] = [];
 const statusEl = document.getElementById("status");
 const portStatusEl = document.getElementById("portStatus");
 const motorStatusEl = document.getElementById("motorStatus");
-const motorInfoEl = document.getElementById("motorInfo");
+const motorInfoEl = document.getElementById("motorInfo"); // optional legacy
 const portSelect = document.getElementById("portSelect");
 const portCustom = document.getElementById("portCustom");
 const portHints = document.getElementById("portHints");
@@ -62,6 +62,7 @@ let lastTelemSid = 0;
 let telemInflight = false;
 let plotDirty = false;
 let latestVals = {};
+let lastMotorInfo = null;
 let focusKey = "iq_a";
 let searchQuery = "";
 const groupOpen = Object.fromEntries(GROUPS.map((g) => [g.id, true]));
@@ -111,25 +112,22 @@ function fillPorts(ports, selected) {
 
 function showMotor(j) {
   motorStatusEl.classList.remove("ok", "fail");
+  if (motorInfoEl) motorInfoEl.textContent = "";
   if (j.motor_ok && j.info) {
     const i = j.info;
     motorStatusEl.classList.add("ok");
-    motorStatusEl.textContent = `电机连接成功 · ${i.motor} · fw ${i.fw_version}`;
-    motorInfoEl.textContent =
-      `node=${i.node_id}  family=${i.family}\n` +
-      `PWM ${i.pwm_hz} Hz  bus ${i.bus_v} V  Imax ${i.i_max_a} A\n` +
-      `poles ${i.pole_pairs}  R ${i.r_ohm} Ω  L ${Number(i.l_uH).toFixed(0)} µH`;
+    // Motor identity / limits live in Config (Flash). Keep only connection + fw.
+    lastMotorInfo = i;
+    motorStatusEl.textContent = `电机连接成功 · fw ${i.fw_version}`;
   } else if (j.motor_error || (j.ok && j.motor_ok === false)) {
     motorStatusEl.classList.add("fail");
     motorStatusEl.textContent = j.motor_error || "电机连接失败";
-    motorInfoEl.textContent = "";
   } else if (!j.ok && j.error) {
     motorStatusEl.classList.add("fail");
     motorStatusEl.textContent = `CAN 连接失败：${j.error}`;
-    motorInfoEl.textContent = j.hint || "";
+    if (motorInfoEl && j.hint) motorInfoEl.textContent = j.hint;
   } else {
     motorStatusEl.textContent = "电机未探测";
-    motorInfoEl.textContent = "";
   }
 }
 
@@ -666,12 +664,12 @@ document.getElementById("btnConnect").onclick = async () => {
   portStatusEl.textContent = `正在打开 CAN ${iface}（ip link up + 连接）…`;
   motorStatusEl.textContent = "正在探测电机…";
   motorStatusEl.classList.remove("ok", "fail");
-  motorInfoEl.textContent = "";
+  if (motorInfoEl) motorInfoEl.textContent = "";
   const j = await postJson("/api/can/open", { interface: iface });
   fillPorts(j.ports || [], iface);
   if (!j.ok) {
     portStatusEl.textContent = `打开失败: ${j.error || ""}`;
-    if (j.hint) motorInfoEl.textContent = j.hint;
+    if (motorInfoEl && j.hint) motorInfoEl.textContent = j.hint;
   } else {
     portStatusEl.textContent = `CAN 已打开: ${j.interface}`;
   }
@@ -731,7 +729,11 @@ function optionalNumber(id) {
 }
 document.getElementById("btnVel").onclick = () => {
   const input = document.getElementById("omegaMech");
-  const omega = Math.max(-200, Math.min(200, Number(input.value)));
+  const omega = Number(input.value);
+  if (!Number.isFinite(omega)) {
+    statusEl.textContent = "ω 无效";
+    return;
+  }
   input.value = String(omega);
   const body = {
     op: "servo",
@@ -1055,6 +1057,7 @@ function updateCalPanel(t) {
   if (!bar || !status || !verdict || !box) return;
   bar.style.width = `${pct}%`;
   status.textContent = `${t.cal_state_name || "idle"} · ${pct}% · samples=${t.cal_samples || 0}`;
+  void maybeSyncMotorConfAfterCal(t);
 
   if (t.cal_kind === CAL_KIND_BEMF) {
     if (t.cal_state_name === "done" && t.cal_ok) {
@@ -1069,8 +1072,9 @@ function updateCalPanel(t) {
         `vendor line-line Vpeak/krpm ≈ ${j.bemfVPerKrpm.toFixed(3)}\n` +
         `r² = ${j.r2.toFixed(4)}\n` +
         `points_used = ${j.points}\n\n` +
-        `已运行时生效（current_loop Ke 与 position_loop Kt 已分别更新）\n` +
-        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}`;
+        `已写入 Config → Motor.bemf，并已生效\n` +
+        `掉电保留：到 Config 页点 Save（标定 Flash 只记状态灯）\n` +
+        `cal_flash = ${t.cal_persisted ? "OK" : "pending/fail"}`;
     } else if (t.cal_state_name === "failed") {
       verdict.textContent = "判定：失败 — 拟合点不足或电机未跟上目标转速";
       box.classList.remove("cal-good", "cal-warn", "cal-bad");
@@ -1094,8 +1098,9 @@ function updateCalPanel(t) {
         `R = ${j.r.toFixed(4)} Ohm\n` +
         `r² = ${j.r2.toFixed(4)}\n` +
         `points_used = ${j.points}\n\n` +
-        `已运行时生效（current_loop 电流环 kp/ki 已按新 R 重算）\n` +
-        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}\n\n` +
+        `已写入 Config → Motor.R，并已生效\n` +
+        `掉电保留：到 Config 页点 Save（标定 Flash 只记状态灯）\n` +
+        `cal_flash = ${t.cal_persisted ? "OK" : "pending/fail"}\n\n` +
         `建议接下来做 L 辨识（会自动用这个 R 值）。`;
     } else if (t.cal_state_name === "failed") {
       verdict.textContent = "判定：失败 — 拟合点不足";
@@ -1120,8 +1125,9 @@ function updateCalPanel(t) {
         `Lq = ${(j.lq * 1e6).toFixed(3)} uH\n` +
         `Lq/Ld = ${j.ratio.toFixed(3)}\n` +
         `trials_used_total = ${j.trials}\n\n` +
-        `已运行时生效（D/Q 电流环 kp 与交叉耦合分别使用 Ld/Lq）\n` +
-        `flash_nvs = ${t.cal_persisted ? "OK，掉电后仍会加载" : "pending/fail — 可重做一次"}`;
+        `已写入 Config → Motor.L = (Ld+Lq)/2，FOC 仍用独立 Ld/Lq\n` +
+        `掉电保留：到 Config 页点 Save（标定 Flash 只记状态灯）\n` +
+        `cal_flash = ${t.cal_persisted ? "OK" : "pending/fail"}`;
     } else if (t.cal_state_name === "failed") {
       verdict.textContent = "判定：失败 — D/Q 至少一轴有效试验不足";
       box.classList.remove("cal-good", "cal-warn", "cal-bad");
@@ -1303,11 +1309,16 @@ function setMode(mode) {
   document.getElementById("panelSnap").hidden = mode !== "snap";
   const panelCal = document.getElementById("panelCal");
   if (panelCal) panelCal.hidden = mode !== "cal";
+  const panelConfig = document.getElementById("panelConfig");
+  if (panelConfig) panelConfig.hidden = mode !== "config";
   for (const btn of document.querySelectorAll(".modeBtn")) {
     btn.classList.toggle("active", btn.dataset.mode === mode);
   }
   if (mode === "live") draw();
   else if (mode === "snap") drawSnap();
+  else if (mode === "config") {
+    // Keep current form values; user can Refresh/Load explicitly.
+  }
 }
 
 for (const btn of document.querySelectorAll(".modeBtn")) {
@@ -1538,7 +1549,7 @@ document.getElementById("btnSnapAnalyze").onclick = async () => {
   try {
     const w = Number(document.getElementById("snapOmega").value) || 0;
     const j = await postJson("/api/snap/analyze", {
-      pole_pairs: 14,
+      pole_pairs: Number(lastMotorInfo && lastMotorInfo.pole_pairs) || 14,
       omega_mech: w,
     });
     let encRatio = null;
@@ -1583,6 +1594,202 @@ document.getElementById("btnSnapAnalyze").onclick = async () => {
 };
 
 
+
+/* ---- Config panel ---- */
+const CONF_GROUPS = {
+  motor: [
+    "pole_pairs",
+    "R",
+    "L",
+    "bemf_Vpeak_per_krpm",
+    "max_phase_current_A",
+    "fw_speed_rad_s",
+    "bus_V",
+  ],
+  foc: [
+    "bandwidth_hz",
+    "bemf_ff",
+    "current_ff",
+    "cross_ff",
+    "max_current_rate",
+  ],
+  servo: [
+    "kp",
+    "ki",
+    "kd",
+    "ilimit",
+    "sign",
+    "max_iq",
+    "vel_threshold",
+    "slip",
+    "vel_err",
+    "default_vel_limit",
+    "default_accel_limit",
+  ],
+  encoder: ["pll_filter_hz", "spike_error_rad", "filter_us"],
+};
+
+const confStatus = document.getElementById("confStatus");
+
+function confInput(group, key) {
+  return document.querySelector(`[data-conf="${group}.${key}"]`);
+}
+
+function setConfStatus(ok, msg) {
+  if (!confStatus) return;
+  confStatus.classList.toggle("ok", !!ok);
+  confStatus.classList.toggle("fail", ok === false);
+  confStatus.textContent = msg;
+}
+
+function readConfGroup(group) {
+  const keys = CONF_GROUPS[group] || [];
+  const fields = {};
+  for (const key of keys) {
+    const el = confInput(group, key);
+    if (!el) continue;
+    const raw = String(el.value ?? "").trim();
+    if (raw === "") {
+      // Servo accel empty => NaN (null over the wire).
+      fields[key] = group === "servo" && key === "default_accel_limit" ? null : 0;
+      continue;
+    }
+    const n = Number(raw);
+    fields[key] = Number.isFinite(n) ? n : null;
+  }
+  return fields;
+}
+
+function writeConfGroup(group, fields) {
+  if (!fields || typeof fields !== "object") return;
+  const keys = CONF_GROUPS[group] || [];
+  for (const key of keys) {
+    const el = confInput(group, key);
+    if (!el || !(key in fields)) continue;
+    const v = fields[key];
+    if (v === null || v === undefined || Number.isNaN(v)) {
+      el.value = "";
+    } else {
+      el.value = String(v);
+    }
+  }
+}
+
+function writeConfAll(fieldsByGroup) {
+  if (!fieldsByGroup) return;
+  // get(all) returns {motor:{...}, foc:{...}, ...}
+  for (const group of Object.keys(CONF_GROUPS)) {
+    if (fieldsByGroup[group]) writeConfGroup(group, fieldsByGroup[group]);
+  }
+  if (fieldsByGroup.cal) writeCalStatus(fieldsByGroup.cal);
+}
+
+function writeCalStatus(cal) {
+  const box = document.getElementById("confCalValues");
+  const keys = ["encoder", "resistance", "inductance", "bemf", "cogging", "enc_comp"];
+  for (const key of keys) {
+    const el = document.querySelector(`[data-cal="${key}"]`);
+    if (!el) continue;
+    const on = !!(cal && cal[key]);
+    el.classList.toggle("on", on);
+    el.classList.toggle("off", !on);
+  }
+  if (!box) return;
+  if (!cal) {
+    box.textContent = "尚未读取";
+    return;
+  }
+  const fmt = (v, unit) =>
+    v === null || v === undefined || Number.isNaN(v)
+      ? "—"
+      : `${Number(v).toPrecision(4)}${unit}`;
+  box.textContent =
+    `R=${fmt(cal.R, " Ω")}  Ld=${fmt(cal.Ld, " H")}  Lq=${fmt(cal.Lq, " H")}\n` +
+    `Ke(dq)=${fmt(cal.Ke, " V·s/rad")}  flags=0x${(cal.flags >>> 0).toString(16)}`;
+}
+
+async function postConf(body) {
+  const j = await postJson("/api/conf", body);
+  return j;
+}
+
+let lastMotorConfSyncKey = null;
+
+async function maybeSyncMotorConfAfterCal(t) {
+  if (!t || t.cal_state_name !== "done" || !t.cal_ok) return;
+  const kind = Number(t.cal_kind);
+  if (![CAL_KIND_RESISTANCE, CAL_KIND_INDUCTANCE, CAL_KIND_BEMF].includes(kind)) return;
+  const key = `${kind}:${t.cal_samples || 0}:${Number(t.cal_offset_rad) || 0}`;
+  if (key === lastMotorConfSyncKey) return;
+  lastMotorConfSyncKey = key;
+  try { await confGetAll(); } catch (_) {}
+}
+
+async function confGetAll() {
+  setConfStatus(null, "getting config…");
+  try {
+    const j = await postConf({ op: "get", group: "all" });
+    if (!j.ok) {
+      setConfStatus(false, j.error || "get failed");
+      return;
+    }
+    writeConfAll(j.fields || {});
+    const flash = j.flash_valid ? "flash=valid" : "flash=empty";
+    setConfStatus(true, `get ok (${flash})`);
+  } catch (e) {
+    setConfStatus(false, String(e.message || e));
+  }
+}
+
+async function confApply(group) {
+  setConfStatus(null, `applying ${group}…`);
+  try {
+    const fields = readConfGroup(group);
+    const j = await postConf({ op: "set", group, fields });
+    if (!j.ok) {
+      setConfStatus(false, j.error || `set ${group} failed`);
+      return;
+    }
+    if (j.fields) writeConfGroup(group, j.fields);
+    setConfStatus(true, `set ${group} ok`);
+  } catch (e) {
+    setConfStatus(false, String(e.message || e));
+  }
+}
+
+async function confSimple(op) {
+  setConfStatus(null, `${op}…`);
+  try {
+    const j = await postConf({ op, group: "all" });
+    if (!j.ok) {
+      setConfStatus(false, j.error || `${op} failed`);
+      return;
+    }
+    // After load/defaults, refresh RAM view.
+    if (op === "load" || op === "defaults") {
+      const g = await postConf({ op: "get", group: "all" });
+      if (g.ok) writeConfAll(g.fields || {});
+    }
+    setConfStatus(true, `${op} ok`);
+  } catch (e) {
+    setConfStatus(false, String(e.message || e));
+  }
+}
+
+const btnConfGet = document.getElementById("btnConfGet");
+const btnConfLoad = document.getElementById("btnConfLoad");
+const btnConfSave = document.getElementById("btnConfSave");
+const btnConfDefaults = document.getElementById("btnConfDefaults");
+if (btnConfGet) btnConfGet.onclick = () => confGetAll();
+if (btnConfLoad) btnConfLoad.onclick = () => confSimple("load");
+if (btnConfSave) btnConfSave.onclick = () => confSimple("save");
+if (btnConfDefaults) btnConfDefaults.onclick = () => confSimple("defaults");
+for (const btn of document.querySelectorAll("[data-conf-apply]")) {
+  btn.onclick = () => confApply(btn.getAttribute("data-conf-apply"));
+}
+
+
 renderSnapTree();
 setMode("live");
+
 

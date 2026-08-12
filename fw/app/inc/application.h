@@ -16,6 +16,7 @@
 #include "math/foc/modulator.h"
 #include "middleware/encoder/encoder_service.h"
 #include "middleware/calibration/calibration_manager.h"
+#include "nvs/runtime_config_store.h"
 #include "pool/pool.h"
 #include "snapshot_capture.h"
 #include "telemetry/binary_link.h"
@@ -64,7 +65,18 @@ class Application
   uint8_t HandleInfo(uint8_t seq);
   uint8_t HandleSnap(uint8_t seq, const uint8_t* payload, size_t payload_len);
   uint8_t HandleEncComp(const uint8_t* payload, size_t payload_len);
+  uint8_t HandleConf(uint8_t seq, const uint8_t* payload, size_t payload_len);
 
+  void FillDefaultRuntimeConfig();
+  void ApplyRuntimeConfig();
+  // When runtime Flash is empty, copy electricals from cal Flash into Motor.
+  void SeedMotorElectricalFromCalFlash();
+  // Cal result → Motor table (RAM). Persist with Config Save.
+  void SyncMotorConfFromResistanceCal();
+  void SyncMotorConfFromInductanceCal();
+  void SyncMotorConfFromBemfCal();
+  bool SendConfGroup(uint8_t seq, uint8_t op, uint8_t group);
+  float PolePairs() const;
 
   bool Init();
   void RunOnce();
@@ -117,6 +129,8 @@ class Application
   ::pool::PoolPtr<math::servo_mode::ServoMode> servo_mode_;
   middleware::encoder::EncoderService encoder_;
   middleware::calibration::CalibrationManager calibration_;
+  nvs::RuntimeConfig runtime_config_{};
+  bool runtime_config_flash_valid_ = false;
   ::pool::PoolPtr<telemetry::BinaryLink> binary_link_;
 };
 

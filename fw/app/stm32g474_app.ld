@@ -4,8 +4,11 @@ STACK_SIZE = 0x2000;
 
 MEMORY
 {
-  /* Reserve final 4 KiB (0x0807F000..0x0807FFFF) for NVS encoder cal. */
-  APP_FLASH (rx) : ORIGIN = 0x08010000, LENGTH = 444K
+  /* Reserve final 8 KiB for NVS:
+     0x0807E000..0x0807E7FF runtime conf (page 124)
+     0x0807E800..0x0807EFFF unused gap
+     0x0807F000..0x0807FFFF encoder/motor cal (pages 126-127) */
+  APP_FLASH (rx) : ORIGIN = 0x08010000, LENGTH = 440K
   /* 0x20000000-0x200001ff is shared reset-persistent handoff storage. */
   RAM (rwx)      : ORIGIN = 0x20000200, LENGTH = 128K - 0x200
 }

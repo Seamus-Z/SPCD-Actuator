@@ -152,6 +152,12 @@ inline float BemfVPerMechRadS(const device::motor::Params& motor)
       (math::k2Pi * math::kSqrt3);
 }
 
+// Inverse of BemfVPerMechRadS: store identified dq Ke back into Motor.bemf.
+inline float BemfVpeakPerKrpmFromDqKe(float ke_dq_v_s_per_rad)
+{
+  return ke_dq_v_s_per_rad * (math::k2Pi * math::kSqrt3) * (1000.0f / 60.0f);
+}
+
 // For the amplitude-invariant 2/3 Park transform, Kt = 3/2 * Ke_dq.
 inline float VendorTorqueConstantNmPerA(const device::motor::Params& motor)
 {

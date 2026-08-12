@@ -131,6 +131,9 @@ class ServoMode
     options_.max_torque_Nm = nm_per_a * options_.max_iq_A;
   }
 
+  void SetOptions(const Options& options) { options_ = options; }
+  const Options& options() const { return options_; }
+
   bool active() const { return active_; }
   float iq_ref_A() const { return iq_ref_; }
   float id_ref_A() const { return command_.id_ref_A; }

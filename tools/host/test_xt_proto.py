@@ -1,3 +1,4 @@
+import math
 import struct
 import unittest
 
@@ -209,6 +210,187 @@ class SnapProtocolTest(unittest.TestCase):
             "id_a", "iq_a", "i1_a", "i2_a", "i3_a",
             "theta_mech_rad", "theta_elec_rad",
         ])
+
+
+
+class ConfProtocolTest(unittest.TestCase):
+    def test_pack_conf_get_layout(self):
+        frame = xt_proto.pack_conf_get(xt_proto.CONF_GROUP_MOTOR, seq=3)
+        self.assertEqual(len(frame), 9)
+        self.assertEqual(
+            struct.unpack("<BBBBBBBH", frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 3,
+             xt_proto.CMD_CONF, xt_proto.CONF_OP_GET,
+             xt_proto.CONF_GROUP_MOTOR, 0),
+        )
+
+    def test_pack_conf_set_appends_payload(self):
+        payload = xt_proto.pack_foc_conf(200.0, 1.0, 1.0, 1.0, 10000.0)
+        frame = xt_proto.pack_conf_set(
+            xt_proto.CONF_GROUP_FOC, payload, seq=5
+        )
+        self.assertEqual(len(frame), 9 + 24)
+        hdr = struct.unpack_from("<BBBBBBBH", frame, 0)
+        self.assertEqual(
+            hdr,
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 5,
+             xt_proto.CMD_CONF, xt_proto.CONF_OP_SET,
+             xt_proto.CONF_GROUP_FOC, 0),
+        )
+        self.assertEqual(frame[9:], payload)
+
+    def test_pack_conf_save_load_defaults(self):
+        save = xt_proto.pack_conf_save(seq=1)
+        load = xt_proto.pack_conf_load(xt_proto.CONF_GROUP_SERVO, seq=2)
+        defaults = xt_proto.pack_conf_defaults(seq=3)
+        self.assertEqual(
+            struct.unpack("<BBBBBBBH", save)[4:],
+            (xt_proto.CMD_CONF, xt_proto.CONF_OP_SAVE,
+             xt_proto.CONF_GROUP_ALL, 0),
+        )
+        self.assertEqual(
+            struct.unpack("<BBBBBBBH", load)[4:],
+            (xt_proto.CMD_CONF, xt_proto.CONF_OP_LOAD,
+             xt_proto.CONF_GROUP_SERVO, 0),
+        )
+        self.assertEqual(
+            struct.unpack("<BBBBBBBH", defaults)[4:],
+            (xt_proto.CMD_CONF, xt_proto.CONF_OP_DEFAULTS,
+             xt_proto.CONF_GROUP_ALL, 0),
+        )
+
+    def test_motor_conf_roundtrip(self):
+        raw = xt_proto.pack_motor_conf(
+            pole_pairs=14.0,
+            resistance_ohm=0.65,
+            inductance_H=340e-6,
+            bemf_Vpeak_per_krpm=11.5,
+            max_phase_current_A=4.9,
+            fw_speed_rad_s=200.0,
+            bus_V=48.0,
+        )
+        self.assertEqual(len(raw), 32)
+        decoded = xt_proto.unpack_motor_conf(raw)
+        self.assertEqual(decoded["pole_pairs"], 14.0)
+        self.assertAlmostEqual(decoded["resistance_ohm"], 0.65)
+        self.assertAlmostEqual(decoded["inductance_H"], 340e-6)
+        self.assertEqual(decoded["bus_V"], 48.0)
+
+    def test_foc_conf_roundtrip(self):
+        raw = xt_proto.pack_foc_conf(180.0, 0.9, 0.8, 0.7, 5000.0)
+        self.assertEqual(len(raw), 24)
+        decoded = xt_proto.unpack_foc_conf(raw)
+        self.assertEqual(decoded["bandwidth_hz"], 180.0)
+        self.assertEqual(decoded["max_current_desired_rate_A_s"], 5000.0)
+
+    def test_servo_conf_roundtrip_nan_accel_and_sign(self):
+        raw = xt_proto.pack_servo_conf(
+            kp=4.0,
+            ki=0.0,
+            kd=0.05,
+            ilimit=0.0,
+            max_iq_A=3.0,
+            velocity_threshold=0.5,
+            max_position_slip_rad=3.141592653589793,
+            max_velocity_error_rad_s=0.0,
+            default_velocity_limit_rad_s=200.0,
+            default_accel_limit_rad_s2=None,  # unlimited => NaN
+            sign_f=-1.0,
+        )
+        self.assertEqual(len(raw), 48)
+        decoded = xt_proto.unpack_servo_conf(raw)
+        self.assertEqual(decoded["kp"], 4.0)
+        self.assertEqual(decoded["sign_f"], -1.0)
+        self.assertTrue(math.isnan(decoded["default_accel_limit_rad_s2"]))
+
+        raw2 = xt_proto.pack_servo_conf(
+            kp=1.0, ki=0.0, kd=0.0, ilimit=0.0, max_iq_A=1.0,
+            velocity_threshold=0.0, max_position_slip_rad=0.0,
+            max_velocity_error_rad_s=0.0,
+            default_velocity_limit_rad_s=10.0,
+            default_accel_limit_rad_s2=50.0,
+            sign_f=1.0,
+        )
+        decoded2 = xt_proto.unpack_servo_conf(raw2)
+        self.assertEqual(decoded2["default_accel_limit_rad_s2"], 50.0)
+        self.assertEqual(decoded2["sign_f"], 1.0)
+
+    def test_encoder_conf_roundtrip(self):
+        raw = xt_proto.pack_encoder_conf(400.0, 0.15, 160.0)
+        self.assertEqual(len(raw), 16)
+        decoded = xt_proto.unpack_encoder_conf(raw)
+        self.assertEqual(decoded["pll_filter_hz"], 400.0)
+        self.assertAlmostEqual(decoded["spike_error_rad"], 0.15)
+        self.assertEqual(decoded["filter_us"], 160.0)
+
+    def test_parse_conf_reply(self):
+        payload = xt_proto.pack_motor_conf(
+            14.0, 0.65, 340e-6, 11.5, 4.9, 200.0, 48.0
+        )
+        frame = struct.pack(
+            "<BBBBBBH",
+            xt_proto.MAGIC,
+            xt_proto.VERSION,
+            xt_proto.TYPE_CONF,
+            11,
+            xt_proto.CONF_OP_GET,
+            xt_proto.CONF_GROUP_MOTOR,
+            xt_proto.CONF_FLAG_FLASH_VALID,
+        ) + payload
+        result = xt_proto.parse_frame(frame)
+        self.assertIsInstance(result, xt_proto.ConfReply)
+        self.assertEqual(result.seq, 11)
+        self.assertEqual(result.op, xt_proto.CONF_OP_GET)
+        self.assertEqual(result.group, xt_proto.CONF_GROUP_MOTOR)
+        self.assertTrue(result.flash_valid)
+        self.assertEqual(result.payload, payload)
+        decoded = xt_proto.unpack_motor_conf(result.payload)
+        self.assertEqual(decoded["pole_pairs"], 14.0)
+
+    def test_conf_set_roundtrip_through_reply(self):
+        payload = xt_proto.pack_encoder_conf(350.0, 0.2, 120.0)
+        req = xt_proto.pack_conf_set(
+            xt_proto.CONF_GROUP_ENCODER, payload, seq=9
+        )
+        # Device echo-style TYPE_CONF reply with same payload.
+        reply = (
+            xt_proto.pack_header(xt_proto.TYPE_CONF, 9)
+            + struct.pack(
+                "<BBH",
+                xt_proto.CONF_OP_SET,
+                xt_proto.CONF_GROUP_ENCODER,
+                0,
+            )
+            + payload
+        )
+        parsed = xt_proto.parse_frame(reply)
+        self.assertEqual(parsed.payload, req[9:])
+        self.assertEqual(
+            xt_proto.unpack_encoder_conf(parsed.payload)["pll_filter_hz"],
+            350.0,
+        )
+
+
+
+
+    def test_cal_status_conf_roundtrip(self):
+        payload = xt_proto.pack_cal_status_conf(
+            flags=(xt_proto.CAL_FLAG_ENCODER | xt_proto.CAL_FLAG_RESISTANCE),
+            resistance_ohm=0.65,
+            inductance_d_H=None,
+            inductance_q_H=None,
+            bemf_v_per_hz=0.01,
+        )
+        self.assertEqual(len(payload), 20)
+        decoded = xt_proto.unpack_cal_status_conf(payload)
+        self.assertTrue(decoded["encoder"])
+        self.assertTrue(decoded["resistance"])
+        self.assertFalse(decoded["inductance"])
+        self.assertAlmostEqual(decoded["R"], 0.65, places=5)
+        self.assertIsNone(decoded["Ld"])
+        self.assertAlmostEqual(decoded["Ke"], 0.01, places=5)
+        gui = xt_proto.unpack_conf_fields("cal", payload)
+        self.assertTrue(gui["encoder"])
 
 
 if __name__ == "__main__":

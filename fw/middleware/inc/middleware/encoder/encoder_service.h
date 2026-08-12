@@ -103,6 +103,20 @@ class EncoderService {
   const Sample& sample() const { return sample_; }
   const math::servo_mode::EncoderPll& pll() const { return pll_; }
 
+  void SetPllOptions(const math::servo_mode::EncoderPll::Options& options)
+  {
+    pll_.SetOptions(options);
+  }
+
+  bool SetSensorFilterUs(uint16_t filter_us)
+  {
+    if (sensor_.get() == nullptr)
+    {
+      return false;
+    }
+    return sensor_->SetFilterUs(filter_us);
+  }
+
   Calibration calibration() const { return calibration_; }
 
   void SetCalibration(const Calibration& calibration)

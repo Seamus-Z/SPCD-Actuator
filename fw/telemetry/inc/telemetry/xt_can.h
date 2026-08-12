@@ -23,6 +23,8 @@ inline constexpr uint8_t kTypeEnc = 7;
 inline constexpr uint8_t kTypeCal = 8;
 // moteus-style control reply (cmd/query → one merged Live frame).
 inline constexpr uint8_t kTypeCtrlReply = 9;
+// Reply payload for kCmdConf GET (and optional SET echo).
+inline constexpr uint8_t kTypeConf = 10;
 
 inline constexpr uint8_t kCmdStop = 0;
 inline constexpr uint8_t kCmdInfo = 4;
@@ -36,11 +38,13 @@ inline constexpr uint8_t kCmdCal = 7;
 inline constexpr uint8_t kCmdQuery = 8;
 // Upload moteus-style encoder geometric compensation table.
 inline constexpr uint8_t kCmdEncComp = 9;
+// Runtime config get/set/save (motor/foc/servo/encoder).
+inline constexpr uint8_t kCmdConf = 10;
 
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 6;
-inline constexpr uint8_t kFwPatch = 1;
+inline constexpr uint8_t kFwPatch = 5;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -85,6 +89,26 @@ inline constexpr uint8_t kCalSubCogging = 6;
 inline constexpr uint8_t kEncCompOpClear = 0;   // disable + zero table, persist
 inline constexpr uint8_t kEncCompOpChunk = 1;   // write 32-byte chunk
 inline constexpr uint8_t kEncCompOpCommit = 2;  // enable with scale, persist
+
+// kCmdConf ops / groups.
+inline constexpr uint8_t kConfOpGet = 0;
+inline constexpr uint8_t kConfOpSet = 1;       // RAM only
+inline constexpr uint8_t kConfOpSave = 2;      // RAM -> flash
+inline constexpr uint8_t kConfOpLoad = 3;      // flash -> RAM -> apply
+inline constexpr uint8_t kConfOpDefaults = 4;  // board defaults -> RAM -> apply
+inline constexpr uint8_t kConfGroupMotor = 0;
+inline constexpr uint8_t kConfGroupFoc = 1;
+inline constexpr uint8_t kConfGroupServo = 2;
+inline constexpr uint8_t kConfGroupEncoder = 3;
+inline constexpr uint8_t kConfGroupCal = 4;  // read-only calibration flash status
+inline constexpr uint8_t kConfGroupAll = 0xFF;
+inline constexpr uint32_t kCalFlagEncoder = 1u << 0;
+inline constexpr uint32_t kCalFlagResistance = 1u << 1;
+inline constexpr uint32_t kCalFlagInductance = 1u << 2;
+inline constexpr uint32_t kCalFlagBemf = 1u << 3;
+inline constexpr uint32_t kCalFlagCogging = 1u << 4;
+inline constexpr uint32_t kCalFlagEncComp = 1u << 5;
+inline constexpr uint16_t kConfFlagFlashValid = 1u << 0;
 
 inline constexpr uint8_t kStatusOk = 0;
 inline constexpr uint8_t kStatusBadLen = 1;
@@ -357,6 +381,85 @@ struct SnapData
 static_assert(sizeof(Header) == 4, "Header size");
 static_assert(sizeof(Ack) == 8, "Ack size");
 // hdr4 + node/fw4 + 7*u16 + motor12 = 34
+
+// Host <-> device runtime config groups (kCmdConf). Sizes fit one CAN-FD frame
+// together with ConfReply header (GET/SET are single-group only).
+struct MotorConf
+{
+  float pole_pairs;
+  float resistance_ohm;
+  float inductance_H;
+  float bemf_Vpeak_per_krpm;
+  float max_phase_current_A;
+  float fw_speed_rad_s;
+  float bus_V;
+  float reserved0;
+} __attribute__((packed));
+
+struct FocConf
+{
+  float bandwidth_hz;
+  float bemf_feedforward;
+  float current_feedforward;
+  float cross_coupling_feedforward;
+  float max_current_desired_rate_A_s;
+  float reserved0;
+} __attribute__((packed));
+
+struct ServoConf
+{
+  float kp;
+  float ki;
+  float kd;
+  float ilimit;
+  float max_iq_A;
+  float velocity_threshold;
+  float max_position_slip_rad;
+  float max_velocity_error_rad_s;
+  float default_velocity_limit_rad_s;
+  float default_accel_limit_rad_s2;  // NaN => unlimited
+  float sign_f;                      // -1 or +1
+  float reserved0;
+} __attribute__((packed));
+
+struct EncoderConf
+{
+  float pll_filter_hz;
+  float spike_error_rad;
+  float filter_us;
+  float reserved0;
+} __attribute__((packed));
+
+// Read-only snapshot of calibration flash validity + effective values.
+// Not stored in RuntimeConfigStore; sourced from CalibrationManager / FOC.
+struct CalStatusConf
+{
+  uint32_t flags;          // kCalFlag*
+  float resistance_ohm;    // NaN if not persisted
+  float inductance_d_H;    // NaN if not persisted
+  float inductance_q_H;    // NaN if not persisted
+  float bemf_v_per_hz;     // dq Ke; NaN if not persisted
+} __attribute__((packed));
+
+// Host -> device: after cmd byte for kCmdConf.
+struct ConfRequest
+{
+  uint8_t op;       // kConfOp*
+  uint8_t group;    // kConfGroup*
+  uint16_t reserved;
+  // Optional group payload follows for SET.
+} __attribute__((packed));
+
+// Device -> host: TelId before ACK for GET (optional SET echo).
+struct ConfReply
+{
+  Header hdr;       // type = kTypeConf
+  uint8_t op;
+  uint8_t group;
+  uint16_t flags;   // kConfFlagFlashValid
+  // Group payload follows.
+} __attribute__((packed));
+
 static_assert(sizeof(Info) == 34, "Info size");
 // hdr4 + flags2 + 11*i32 + 3*u16 duty + bus_u16 + mode + reserved = 60
 static_assert(sizeof(Telemetry) == 60, "Telemetry size");
@@ -372,6 +475,13 @@ static_assert(sizeof(SnapRequest) == 6, "SnapRequest size");
 static_assert(sizeof(SnapMeta) == 16, "SnapMeta size");
 // hdr4 + idx2 + n1 + r1 + 4*7*i16 = 8 + 56 = 64
 static_assert(sizeof(SnapData) == 64, "SnapData size");
+static_assert(sizeof(MotorConf) == 32, "MotorConf size");
+static_assert(sizeof(FocConf) == 24, "FocConf size");
+static_assert(sizeof(ServoConf) == 48, "ServoConf size");
+static_assert(sizeof(EncoderConf) == 16, "EncoderConf size");
+static_assert(sizeof(CalStatusConf) == 20, "CalStatusConf size");
+static_assert(sizeof(ConfRequest) == 4, "ConfRequest size");
+static_assert(sizeof(ConfReply) == 8, "ConfReply size");
 
 }  // namespace xt_can
 }  // namespace telemetry

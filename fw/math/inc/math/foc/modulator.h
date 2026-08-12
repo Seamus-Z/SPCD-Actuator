@@ -67,6 +67,7 @@ class DqModulator
   float q_voltage_V() const { return q_voltage_; }
   float theta_rate_rad_s() const { return theta_rate_; }
   float bus_V() const { return options_.bus_V; }
+  void SetBusVoltage(float bus_V) { options_.bus_V = bus_V; }
 
   // Park measured currents into caller-provided id/iq using current θ.
   void Observe(float ia, float ib, float ic, float* id_A, float* iq_A) const

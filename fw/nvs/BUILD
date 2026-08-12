@@ -14,3 +14,18 @@ cc_library(
     ],
     visibility = ["//fw:__subpackages__"],
 )
+
+cc_library(
+    name = "runtime_config_store",
+    hdrs = ["inc/nvs/runtime_config_store.h"],
+    includes = ["inc"],
+    deps = [
+        "@com_github_ARMmbed_mbed-g4//:mbed",
+    ],
+    copts = [
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-std=c++17",
+    ],
+    visibility = ["//fw:__subpackages__"],
+)

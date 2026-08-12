@@ -47,30 +47,8 @@ class CalibrationManager {
                                 data.encoder_comp_scale,
                                 data.encoder_comp_valid);
     }
-    if (foc_ != nullptr)
-    {
-      if (data.bemf_valid && data.bemf_v_per_hz > 0.005f)
-      {
-        foc_->SetVPerHz(data.bemf_v_per_hz);
-      }
-      if (data.resistance_valid || data.inductance_valid)
-      {
-        const float resistance = data.resistance_valid
-            ? data.resistance_ohm : foc_->resistance_ohm();
-        const float ld = data.inductance_valid
-            ? data.inductance_d_H : foc_->inductance_d_H();
-        const float lq = data.inductance_valid
-            ? data.inductance_q_H : foc_->inductance_q_H();
-        if (resistance > 0.001f && ld > 0.0f && lq > 0.0f)
-        {
-          foc_->SetResistanceInductance(resistance, ld, lq);
-        }
-      }
-    }
-    if (servo_ != nullptr && data.bemf_valid && data.bemf_v_per_hz > 0.005f)
-    {
-      servo_->SetTorqueConstant(1.5f * data.bemf_v_per_hz);
-    }
+    // Electrical R/L/Ke are owned by runtime Config (Motor table). Cal flash
+    // keeps them for status / first-boot seed only — do not override FOC here.
     encoder_persisted_ = true;
     bemf_persisted_ = data.bemf_valid;
     resistance_persisted_ = data.resistance_valid;

@@ -29,9 +29,18 @@ sys.path.insert(0, str(HOST_ROOT))
 import snap_analysis as _snap_an  # noqa: E402
 
 from xt_proto import (  # noqa: E402
+    CMD_CONF,
     CMD_INFO,
     CMD_QUERY,
     CMD_SNAP,
+    CONF_GROUP_ALL,
+    CONF_GROUP_BY_NAME,
+    CONF_GROUP_ENCODER,
+    CONF_GROUP_CAL,
+    CONF_GROUP_FOC,
+    CONF_GROUP_MOTOR,
+    CONF_GROUP_SERVO,
+    CONF_OP_GET,
     SNAP_CHANNEL_KEYS,
     SNAP_CHANNELS,
     SNAP_MAX_SAMPLES,
@@ -39,12 +48,14 @@ from xt_proto import (  # noqa: E402
     STATUS_NOT_RUN,
     Ack,
     CalTelem,
+    ConfReply,
     CtrlReply,
     EncTelem,
     Info,
     SnapData,
     SnapMeta,
     Telemetry,
+    conf_group_id,
     pack_query,
     pack_cal_abort,
     pack_cal_bemf,
@@ -53,12 +64,14 @@ from xt_proto import (  # noqa: E402
     pack_cal_r,
     pack_cal_l,
     pack_cal_cogging,
+    pack_conf,
     pack_enc_comp_clear,
     pack_servo,
     pack_current,
     pack_info,
     pack_snap,
     pack_stop,
+    parse_conf,
     parse_frame,
     cmd_id,
     tel_id,
@@ -76,6 +89,7 @@ _CMD_NAMES = {
     7: "cal",
     8: "query",
     9: "enc_comp",
+    10: "conf",
 }
 
 
@@ -325,6 +339,7 @@ class CanBridge:
         self._acks: Queue = Queue()
         self._replies: Queue = Queue(maxsize=8)
         self._infos: Queue = Queue()
+        self._confs: Queue = Queue()
         self._snap_metas: Queue = Queue()
         self._snap_datas: Queue = Queue()
         self._rx_stop = threading.Event()
@@ -511,7 +526,14 @@ class CanBridge:
         }
 
     def _drain_queues(self):
-        for q in (self._acks, self._replies, self._infos, self._snap_metas, self._snap_datas):
+        for q in (
+            self._acks,
+            self._replies,
+            self._infos,
+            self._confs,
+            self._snap_metas,
+            self._snap_datas,
+        ):
             while True:
                 try:
                     q.get_nowait()
@@ -595,6 +617,16 @@ class CanBridge:
                     f"INFO {info_motor_line(msg)}",
                 )
                 self._infos.put(msg)
+            elif isinstance(msg, ConfReply):
+                self.msglog.push(
+                    "RX",
+                    (
+                        f"CONF op={msg.op} group={msg.group_name} "
+                        f"flash_valid={int(msg.flash_valid)} "
+                        f"fields={msg.fields}"
+                    ),
+                )
+                self._confs.put(msg)
             elif isinstance(msg, SnapMeta):
                 self.msglog.push(
                     "RX",
@@ -1149,6 +1181,227 @@ class CanBridge:
             self._rx_count = 0
             self._rx_window_t0 = now
 
+
+    _CONF_SINGLE_GROUPS = (
+        CONF_GROUP_MOTOR,
+        CONF_GROUP_FOC,
+        CONF_GROUP_SERVO,
+        CONF_GROUP_ENCODER,
+        CONF_GROUP_CAL,
+    )
+
+    def _pause_stream(self):
+        with self._lock:
+            saved_op = self._stream_op
+            saved_args = dict(self._stream_args)
+            self._stream_op = ""
+        return saved_op, saved_args
+
+    def _resume_stream(self, saved_op, saved_args):
+        with self._lock:
+            self._stream_op = saved_op
+            self._stream_args = saved_args
+
+    def _group_name(self, group_i: int) -> str:
+        for name, gid in CONF_GROUP_BY_NAME.items():
+            if gid == group_i:
+                return name
+        return str(group_i)
+
+    def _wait_conf_ack(
+        self,
+        seq: int,
+        timeout: float = 1.5,
+        want_reply: bool = False,
+        group: int | None = None,
+    ) -> tuple[Ack, ConfReply | None]:
+        ack: Ack | None = None
+        reply: ConfReply | None = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if reply is None:
+                try:
+                    cand = self._confs.get(timeout=0.05)
+                except Empty:
+                    cand = None
+                if cand is not None and (
+                    group is None
+                    or cand.group == group
+                    or cand.group == CONF_GROUP_ALL
+                ):
+                    reply = cand
+            if ack is None:
+                try:
+                    cand_ack = self._acks.get(timeout=0.05)
+                except Empty:
+                    cand_ack = None
+                if cand_ack is not None and (
+                    seq < 0 or cand_ack.seq == seq or cand_ack.cmd == CMD_CONF
+                ):
+                    ack = cand_ack
+            if ack is not None and (reply is not None or not want_reply):
+                break
+        if ack is None:
+            raise TimeoutError("no ACK for conf")
+        if want_reply and reply is None:
+            raise TimeoutError("no ConfReply")
+        return ack, reply
+
+    def conf_get(self, group: str | int = "all") -> dict:
+        if self.bus is None:
+            return {"ok": False, "error": "CAN not connected"}
+        group_i = conf_group_id(group)
+        saved = self._pause_stream()
+        try:
+            self._drain_queues()
+            if group_i == CONF_GROUP_ALL:
+                fields = {}
+                flash_valid = False
+                for g in self._CONF_SINGLE_GROUPS:
+                    seq = self._next_seq()
+                    self._send_raw(pack_conf("get", g, seq=seq))
+                    ack, reply = self._wait_conf_ack(
+                        seq, want_reply=True, group=g
+                    )
+                    if ack.status != STATUS_OK:
+                        return {
+                            "ok": False,
+                            "error": f"conf get status={ack.status}",
+                            "status": ack.status,
+                            "group": "all",
+                        }
+                    assert reply is not None
+                    fields[reply.group_name] = reply.fields
+                    flash_valid = flash_valid or reply.flash_valid
+                return {
+                    "ok": True,
+                    "op": "get",
+                    "group": "all",
+                    "flash_valid": flash_valid,
+                    "fields": fields,
+                }
+            seq = self._next_seq()
+            self._send_raw(pack_conf("get", group_i, seq=seq))
+            ack, reply = self._wait_conf_ack(
+                seq, want_reply=True, group=group_i
+            )
+            if ack.status != STATUS_OK:
+                return {
+                    "ok": False,
+                    "error": f"conf get status={ack.status}",
+                    "status": ack.status,
+                    "group": self._group_name(group_i),
+                }
+            assert reply is not None
+            return {
+                "ok": True,
+                "op": "get",
+                "group": reply.group_name,
+                "flash_valid": reply.flash_valid,
+                "fields": reply.fields,
+                "status": ack.status,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        finally:
+            self._resume_stream(*saved)
+
+    def conf_set(self, group: str | int, fields: dict | None = None) -> dict:
+        if self.bus is None:
+            return {"ok": False, "error": "CAN not connected"}
+        group_i = conf_group_id(group)
+        if group_i == CONF_GROUP_ALL:
+            return {"ok": False, "error": "conf set requires a concrete group"}
+        if group_i == CONF_GROUP_CAL:
+            return {"ok": False, "error": "cal status is read-only"}
+        saved = self._pause_stream()
+        try:
+            self._drain_queues()
+            seq = self._next_seq()
+            self._send_raw(
+                pack_conf("set", group_i, fields=fields or {}, seq=seq)
+            )
+            ack, reply = self._wait_conf_ack(
+                seq, want_reply=False, group=group_i
+            )
+            if ack.status != STATUS_OK:
+                return {
+                    "ok": False,
+                    "error": f"conf set status={ack.status}",
+                    "status": ack.status,
+                    "group": self._group_name(group_i),
+                }
+            out = {
+                "ok": True,
+                "op": "set",
+                "group": (
+                    reply.group_name
+                    if reply is not None
+                    else self._group_name(group_i)
+                ),
+                "status": ack.status,
+                "fields": (
+                    reply.fields if reply is not None else dict(fields or {})
+                ),
+            }
+            if reply is not None:
+                out["flash_valid"] = reply.flash_valid
+            return out
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        finally:
+            self._resume_stream(*saved)
+
+    def _conf_simple(self, op: str, group: str | int = "all") -> dict:
+        if self.bus is None:
+            return {"ok": False, "error": "CAN not connected"}
+        group_i = conf_group_id(group)
+        saved = self._pause_stream()
+        try:
+            self._drain_queues()
+            seq = self._next_seq()
+            self._send_raw(pack_conf(op, group_i, seq=seq))
+            ack, reply = self._wait_conf_ack(seq, want_reply=False)
+            if ack.status != STATUS_OK:
+                err = f"conf {op} status={ack.status}"
+                if op == "load" and ack.status == STATUS_FAIL:
+                    err = (
+                        "conf load failed: flash has no saved runtime config "
+                        "(Apply groups, then Save first)"
+                    )
+                return {
+                    "ok": False,
+                    "error": err,
+                    "status": ack.status,
+                    "op": op,
+                    "group": self._group_name(group_i),
+                }
+            out = {
+                "ok": True,
+                "op": op,
+                "group": self._group_name(group_i),
+                "status": ack.status,
+            }
+            if reply is not None:
+                out["flash_valid"] = reply.flash_valid
+                if reply.fields:
+                    out["fields"] = reply.fields
+                    out["group"] = reply.group_name
+            return out
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "op": op}
+        finally:
+            self._resume_stream(*saved)
+
+    def conf_save(self, group: str | int = "all") -> dict:
+        return self._conf_simple("save", group)
+
+    def conf_load(self, group: str | int = "all") -> dict:
+        return self._conf_simple("load", group)
+
+    def conf_defaults(self, group: str | int = "all") -> dict:
+        return self._conf_simple("defaults", group)
+
     def telem_dict(self, after_sid: int = 0):
         motor = self._motor_snapshot()
         with self._lock:
@@ -1206,12 +1459,8 @@ class CanBridge:
 
 
 def info_motor_line(info: Info) -> str:
-    return (
-        f"motor={info.motor} fw={info.fw_version} node={info.node_id} "
-        f"family={info.family} pwm={info.pwm_hz}Hz bus={info.bus_v}V "
-        f"Imax={info.i_max_a}A poles={info.pole_pairs} "
-        f"R={info.r_ohm}ohm L={info.l_h * 1e6:.0f}uH"
-    )
+    # Keep logs short; identity/limits belong in Config/Flash.
+    return f"fw={info.fw_version}"
 
 
 def make_handler(bridge: CanBridge):
@@ -1420,6 +1669,35 @@ def make_handler(bridge: CanBridge):
                         )
                     else:
                         self._json(400, {"ok": False, "error": f"bad action {action}"})
+                except Exception as exc:  # noqa: BLE001
+                    self._json(500, {"ok": False, "error": str(exc)})
+                return
+            if path == "/api/conf":
+                try:
+                    op = str(req.get("op") or "").strip().lower()
+                    group = req.get("group", "all")
+                    fields = req.get("fields")
+                    if fields is not None and not isinstance(fields, dict):
+                        self._json(
+                            400, {"ok": False, "error": "fields must be object"}
+                        )
+                        return
+                    if op == "get":
+                        self._json(200, bridge.conf_get(group))
+                    elif op == "set":
+                        self._json(
+                            200, bridge.conf_set(group, fields or {})
+                        )
+                    elif op == "save":
+                        self._json(200, bridge.conf_save(group))
+                    elif op == "load":
+                        self._json(200, bridge.conf_load(group))
+                    elif op == "defaults":
+                        self._json(200, bridge.conf_defaults(group))
+                    else:
+                        self._json(
+                            400, {"ok": False, "error": f"unknown op {op}"}
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self._json(500, {"ok": False, "error": str(exc)})
                 return

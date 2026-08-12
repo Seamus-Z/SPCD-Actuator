@@ -109,6 +109,39 @@ class FocController
   // Runtime Ke override (e.g. from an on-device identification result).
   void SetVPerHz(float v_per_hz) { options_.v_per_hz = v_per_hz; }
 
+  void SetBusVoltage(float bus_V) { options_.bus_V = bus_V; }
+  void SetMaxCurrent(float max_current_A)
+  {
+    options_.max_current_A = max_current_A;
+  }
+  void SetFeedforwards(float bemf_ff, float current_ff, float cross_ff)
+  {
+    options_.bemf_feedforward = bemf_ff;
+    options_.current_feedforward = current_ff;
+    options_.cross_coupling_feedforward = cross_ff;
+  }
+  void SetMaxCurrentDesiredRate(float rate_A_s)
+  {
+    options_.max_current_desired_rate_A_s = rate_A_s;
+    SyncPiConfig();
+  }
+  void SetPhaseLead(float phase_lead_s) { options_.phase_lead_s = phase_lead_s; }
+  // Recompute PI from current R/L and a desired closed-loop bandwidth.
+  void SetBandwidthHz(float bandwidth_hz)
+  {
+    if (bandwidth_hz < 1.0f)
+    {
+      bandwidth_hz = 1.0f;
+    }
+    const float w = math::k2Pi * bandwidth_hz;
+    options_.kp_d = w * options_.inductance_d_H;
+    options_.kp_q = w * options_.inductance_q_H;
+    options_.ki_d = w * options_.resistance_ohm;
+    options_.ki_q = w * options_.resistance_ohm;
+    SyncPiConfig();
+  }
+  const Options& options() const { return options_; }
+
   float resistance_ohm() const { return options_.resistance_ohm; }
   float inductance_d_H() const { return options_.inductance_d_H; }
   float inductance_q_H() const { return options_.inductance_q_H; }

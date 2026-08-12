@@ -81,6 +81,16 @@ class Ma600
   uint16_t raw() const { return raw_; }
   bool ok() const { return ok_ && !error_; }
   bool error() const { return error_; }
+  uint16_t filter_us() const { return options_.filter_us; }
+
+  // Rewrites the MA600 filter register. Safe to call after Init().
+  bool SetFilterUs(uint16_t filter_us)
+  {
+    options_.filter_us = filter_us;
+    error_ = WriteConfig();
+    ok_ = !error_;
+    return ok_;
+  }
 
 
  private:

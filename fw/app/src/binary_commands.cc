@@ -72,6 +72,9 @@ uint8_t Application::HandleCommand(uint8_t cmd, uint8_t seq, const uint8_t* payl
     case telemetry::xt_can::kCmdEncComp:
       status = HandleEncComp(payload, payload_len);
       break;
+    case telemetry::xt_can::kCmdConf:
+      status = HandleConf(seq, payload, payload_len);
+      break;
     default:
       status = telemetry::xt_can::kStatusBadCmd;
       break;
@@ -543,7 +546,7 @@ uint8_t Application::HandleCal(const uint8_t* payload, size_t payload_len)
   {
     opts.omega_elec_rad_s = -opts.omega_elec_rad_s;
   }
-  opts.pole_pairs = board::MotorParams().pole_pairs;
+  opts.pole_pairs = this->PolePairs();
   // More revs → denser commutation table; reduces one-sided high-speed bias.
   opts.mech_revs_each_way = 3.0f;
   if (is_lock)
@@ -602,10 +605,229 @@ uint8_t Application::HandleCal(const uint8_t* payload, size_t payload_len)
   return telemetry::xt_can::kStatusOk;
 }
 
+
+bool Application::SendConfGroup(uint8_t seq, uint8_t op, uint8_t group)
+{
+  uint8_t buf[8 + 48]{};
+  telemetry::xt_can::ConfReply* reply =
+      reinterpret_cast<telemetry::xt_can::ConfReply*>(buf);
+  reply->hdr.magic = telemetry::xt_can::kMagic;
+  reply->hdr.ver = telemetry::xt_can::kVersion;
+  reply->hdr.type = telemetry::xt_can::kTypeConf;
+  reply->hdr.seq = seq;
+  reply->op = op;
+  reply->group = group;
+  reply->flags = this->runtime_config_flash_valid_
+                     ? telemetry::xt_can::kConfFlagFlashValid
+                     : 0;
+  uint8_t* payload = buf + sizeof(telemetry::xt_can::ConfReply);
+  size_t payload_len = 0;
+  switch (group)
+  {
+    case telemetry::xt_can::kConfGroupMotor:
+      std::memcpy(payload, &this->runtime_config_.motor, sizeof(nvs::MotorConf));
+      payload_len = sizeof(nvs::MotorConf);
+      break;
+    case telemetry::xt_can::kConfGroupFoc:
+      std::memcpy(payload, &this->runtime_config_.foc, sizeof(nvs::FocConf));
+      payload_len = sizeof(nvs::FocConf);
+      break;
+    case telemetry::xt_can::kConfGroupServo:
+      std::memcpy(payload, &this->runtime_config_.servo, sizeof(nvs::ServoConf));
+      payload_len = sizeof(nvs::ServoConf);
+      break;
+    case telemetry::xt_can::kConfGroupEncoder:
+      std::memcpy(payload, &this->runtime_config_.encoder,
+                  sizeof(nvs::EncoderConf));
+      payload_len = sizeof(nvs::EncoderConf);
+      break;
+    case telemetry::xt_can::kConfGroupCal:
+    {
+      telemetry::xt_can::CalStatusConf cal{};
+      uint32_t flags = 0;
+      if (this->calibration_.encoder_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagEncoder;
+      }
+      if (this->calibration_.resistance_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagResistance;
+      }
+      if (this->calibration_.inductance_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagInductance;
+      }
+      if (this->calibration_.bemf_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagBemf;
+      }
+      if (this->calibration_.cogging_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagCogging;
+      }
+      if (this->calibration_.compensation_persisted())
+      {
+        flags |= telemetry::xt_can::kCalFlagEncComp;
+      }
+      cal.flags = flags;
+      cal.resistance_ohm = math::foc::QuietNan();
+      cal.inductance_d_H = math::foc::QuietNan();
+      cal.inductance_q_H = math::foc::QuietNan();
+      cal.bemf_v_per_hz = math::foc::QuietNan();
+      if (this->foc_.get() != nullptr)
+      {
+        if (this->calibration_.resistance_persisted())
+        {
+          cal.resistance_ohm = this->foc_->resistance_ohm();
+        }
+        if (this->calibration_.inductance_persisted())
+        {
+          cal.inductance_d_H = this->foc_->inductance_d_H();
+          cal.inductance_q_H = this->foc_->inductance_q_H();
+        }
+        if (this->calibration_.bemf_persisted())
+        {
+          cal.bemf_v_per_hz = this->foc_->options().v_per_hz;
+        }
+      }
+      std::memcpy(payload, &cal, sizeof(cal));
+      payload_len = sizeof(cal);
+      break;
+    }
+    default:
+      return false;
+  }
+  return this->binary_link_->SendConf(buf, sizeof(telemetry::xt_can::ConfReply) +
+                                               payload_len);
+}
+
+uint8_t Application::HandleConf(uint8_t seq, const uint8_t* payload,
+                                size_t payload_len)
+{
+  if (payload == nullptr ||
+      payload_len < sizeof(telemetry::xt_can::ConfRequest))
+  {
+    return telemetry::xt_can::kStatusBadLen;
+  }
+  telemetry::xt_can::ConfRequest req{};
+  std::memcpy(&req, payload, sizeof(req));
+  const uint8_t* body = payload + sizeof(req);
+  const size_t body_len = payload_len - sizeof(req);
+
+  auto GroupSize = [](uint8_t group) -> size_t {
+    switch (group)
+    {
+      case telemetry::xt_can::kConfGroupMotor:
+        return sizeof(nvs::MotorConf);
+      case telemetry::xt_can::kConfGroupFoc:
+        return sizeof(nvs::FocConf);
+      case telemetry::xt_can::kConfGroupServo:
+        return sizeof(nvs::ServoConf);
+      case telemetry::xt_can::kConfGroupEncoder:
+        return sizeof(nvs::EncoderConf);
+      case telemetry::xt_can::kConfGroupCal:
+        return sizeof(telemetry::xt_can::CalStatusConf);
+      default:
+        return 0;
+    }
+  };
+
+  switch (req.op)
+  {
+    case telemetry::xt_can::kConfOpGet:
+    {
+      if (req.group == telemetry::xt_can::kConfGroupAll ||
+          GroupSize(req.group) == 0)
+      {
+        return telemetry::xt_can::kStatusBadCmd;
+      }
+      if (!SendConfGroup(seq, req.op, req.group))
+      {
+        return telemetry::xt_can::kStatusFail;
+      }
+      return telemetry::xt_can::kStatusOk;
+    }
+    case telemetry::xt_can::kConfOpSet:
+    {
+      if (req.group == telemetry::xt_can::kConfGroupCal)
+      {
+        return telemetry::xt_can::kStatusBadCmd;  // cal is read-only here
+      }
+      const size_t need = GroupSize(req.group);
+      if (need == 0 || body_len < need)
+      {
+        return telemetry::xt_can::kStatusBadLen;
+      }
+      switch (req.group)
+      {
+        case telemetry::xt_can::kConfGroupMotor:
+          std::memcpy(&this->runtime_config_.motor, body, need);
+          break;
+        case telemetry::xt_can::kConfGroupFoc:
+          std::memcpy(&this->runtime_config_.foc, body, need);
+          break;
+        case telemetry::xt_can::kConfGroupServo:
+          std::memcpy(&this->runtime_config_.servo, body, need);
+          break;
+        case telemetry::xt_can::kConfGroupEncoder:
+          std::memcpy(&this->runtime_config_.encoder, body, need);
+          break;
+        default:
+          return telemetry::xt_can::kStatusBadCmd;
+      }
+      ApplyRuntimeConfig();
+      // Calibrated R/L/Ke/tables still override nominal motor values.
+      (void)this->calibration_.LoadPersistentConfig();
+      if (!SendConfGroup(seq, req.op, req.group))
+      {
+        return telemetry::xt_can::kStatusFail;
+      }
+      return telemetry::xt_can::kStatusOk;
+    }
+    case telemetry::xt_can::kConfOpSave:
+    {
+      if (req.group != telemetry::xt_can::kConfGroupAll &&
+          GroupSize(req.group) == 0)
+      {
+        return telemetry::xt_can::kStatusBadCmd;
+      }
+      if (!nvs::RuntimeConfigStore::Save(this->runtime_config_))
+      {
+        return telemetry::xt_can::kStatusFail;
+      }
+      this->runtime_config_flash_valid_ = true;
+      return telemetry::xt_can::kStatusOk;
+    }
+    case telemetry::xt_can::kConfOpLoad:
+    {
+      nvs::RuntimeConfig loaded{};
+      if (!nvs::RuntimeConfigStore::Load(&loaded))
+      {
+        this->runtime_config_flash_valid_ = false;
+        return telemetry::xt_can::kStatusFail;
+      }
+      this->runtime_config_ = loaded;
+      this->runtime_config_flash_valid_ = true;
+      ApplyRuntimeConfig();
+      // Calibrated R/L/Ke/tables still win over nominal motor conf.
+      (void)this->calibration_.LoadPersistentConfig();
+      return telemetry::xt_can::kStatusOk;
+    }
+    case telemetry::xt_can::kConfOpDefaults:
+    {
+      FillDefaultRuntimeConfig();
+      ApplyRuntimeConfig();
+      (void)this->calibration_.LoadPersistentConfig();
+      return telemetry::xt_can::kStatusOk;
+    }
+    default:
+      return telemetry::xt_can::kStatusBadCmd;
+  }
+}
+
 uint8_t Application::HandleInfo(uint8_t seq)
 {
-  const auto& motor = board::MotorParams();
-  const auto cl = board::FocControllerOptions();
+  const auto& motor = this->runtime_config_.motor;
 
   telemetry::xt_can::Info info{};
   info.hdr.seq = seq;
@@ -615,13 +837,14 @@ uint8_t Application::HandleInfo(uint8_t seq)
   info.fw_patch = telemetry::xt_can::kFwPatch;
   info.pwm_hz = static_cast<uint16_t>(board::PhasePwmOptions().rate_hz);
   info.bus_mV =
-      static_cast<uint16_t>(board::kBusVoltage_V * 1000.0f + 0.5f);
-  info.i_max_mA = static_cast<uint16_t>(cl.max_current_A * 1000.0f + 0.5f);
+      static_cast<uint16_t>(motor.bus_V * 1000.0f + 0.5f);
+  info.i_max_mA =
+      static_cast<uint16_t>(motor.max_phase_current_A * 1000.0f + 0.5f);
   info.pole_pairs = static_cast<uint16_t>(motor.pole_pairs + 0.5f);
   info.r_mohm =
-      static_cast<uint16_t>(motor.phase_resistance_ohm * 1000.0f + 0.5f);
+      static_cast<uint16_t>(motor.resistance_ohm * 1000.0f + 0.5f);
   info.l_uH =
-      static_cast<uint16_t>(motor.phase_inductance_H * 1.0e6f + 0.5f);
+      static_cast<uint16_t>(motor.inductance_H * 1.0e6f + 0.5f);
   info.family = 3;  // moteus-x1 / family 3
   std::memset(info.motor, 0, sizeof(info.motor));
   std::strncpy(info.motor, device::motor::kActiveName, sizeof(info.motor) - 1);

@@ -94,6 +94,11 @@ void BinaryLink::SendInfo(const xt_can::Info& info)
   (void)SendRaw(tel_id(), &out, sizeof(out));
 }
 
+bool BinaryLink::SendConf(const void* data, size_t len)
+{
+  return SendRaw(tel_id(), data, len);
+}
+
 bool BinaryLink::SendSnapMeta(const xt_can::SnapMeta& meta)
 {
   xt_can::SnapMeta out = meta;
