@@ -7,6 +7,7 @@
 #include "math/foc/controller.h"
 #include "math/servo_mode/encoder_pll.h"
 #include "math/servo_mode/servo_mode.h"
+#include "math/servo_mode/mit_mode.h"
 #include "math/foc/modulator.h"
 #include "math/constants.h"
 #include "device/drv8353s.h"
@@ -242,6 +243,17 @@ inline math::servo_mode::ServoMode::Options ServoModeOptions()
   // by the virtual trajectory. The command-side clamp still prevents the
   // trajectory from exceeding the host command.
   options.max_velocity_error_rad_s = 0.0f;
+  return options;
+}
+
+
+inline math::servo_mode::MitMode::Options MitModeOptions()
+{
+  const auto servo = ServoModeOptions();
+  math::servo_mode::MitMode::Options options;
+  options.max_torque_Nm = servo.max_torque_Nm;
+  options.torque_constant_Nm_A = servo.torque_constant_Nm_A;
+  options.max_iq_A = servo.max_iq_A;
   return options;
 }
 

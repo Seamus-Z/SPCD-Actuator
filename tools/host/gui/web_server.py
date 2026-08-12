@@ -67,6 +67,7 @@ from xt_proto import (  # noqa: E402
     pack_conf,
     pack_enc_comp_clear,
     pack_servo,
+    pack_mit,
     pack_current,
     pack_info,
     pack_snap,
@@ -111,6 +112,7 @@ _MODE_NAMES = {
     1: "servo",
     2: "cal",
     3: "current",
+    4: "mit",
 }
 
 
@@ -715,6 +717,17 @@ class CanBridge:
             return pack_current(
                 float(args.get("id", 0)),
                 float(args.get("iq", 0)),
+                seq,
+            )
+        if op == "mit":
+            max_t = args.get("max_torque")
+            return pack_mit(
+                float(args.get("position", 0)),
+                float(args.get("velocity", 0)),
+                float(args.get("kp", 0)),
+                float(args.get("kd", 0)),
+                float(args.get("feedforward", 0) or 0),
+                None if max_t is None else float(max_t),
                 seq,
             )
         return pack_query(seq)
@@ -1737,6 +1750,19 @@ def make_handler(bridge: CanBridge):
                         iq=float(req.get("iq", 0)),
                     )
                     self._json(200, {"ok": True, "status": 0, "stream": "current"})
+                    return
+                if op == "mit":
+                    args = {
+                        "position": float(req.get("position", 0)),
+                        "velocity": float(req.get("velocity", 0)),
+                        "kp": float(req.get("kp", 0)),
+                        "kd": float(req.get("kd", 0)),
+                        "feedforward": float(req.get("feedforward", 0) or 0),
+                    }
+                    if "max_torque" in req and req.get("max_torque") is not None and str(req.get("max_torque")) != "":
+                        args["max_torque"] = float(req.get("max_torque"))
+                    bridge.set_stream("mit", **args)
+                    self._json(200, {"ok": True, "status": 0, "stream": "mit"})
                     return
                 if op == "cal_enc":
                     bridge.set_stream("query")

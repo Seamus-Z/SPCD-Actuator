@@ -44,7 +44,7 @@ inline constexpr uint8_t kCmdConf = 10;
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 6;
-inline constexpr uint8_t kFwPatch = 5;
+inline constexpr uint8_t kFwPatch = 6;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -137,10 +137,12 @@ inline constexpr uint8_t kModeStop = 0;
 inline constexpr uint8_t kModeServo = 1;     // position or velocity (outer PID)
 inline constexpr uint8_t kModeCal = 2;
 inline constexpr uint8_t kModeCurrent = 3;   // direct Id/Iq current mode
+inline constexpr uint8_t kModeMit = 4;       // MIT impedance → Iq
 
 // kCmdServo payload.control
 inline constexpr uint8_t kServoCtrlPosition = 0;  // position/velocity PID → Iq
 inline constexpr uint8_t kServoCtrlCurrent = 1;   // direct Id/Iq
+inline constexpr uint8_t kServoCtrlMit = 2;       // MIT: T=Kp(e_p)+Kd(e_v)+T_ff
 // position_mrad sentinel: velocity tracking (moteus position=NaN).
 inline constexpr int32_t kPositionNanMrad = static_cast<int32_t>(0x80000000u);
 
@@ -288,6 +290,12 @@ struct CtrlReply
 //   *_scale_milli = 0 → 1000 (1.0).
 // control=kServoCtrlCurrent:
 //   id_mA / iq_mA are the FOC references; position fields ignored.
+// control=kServoCtrlMit:
+//   T = Kp*(P_cmd-P_fdb) + Kd*(V_cmd-V_fdb) + T_ff  (industry sign).
+//   position_mrad / velocity_mrad_s = continuous multi-turn P_cmd / V_cmd.
+//   id_mA = Kp [mNm/rad]; iq_mA = Kd [mNm/(rad/s)]  (field reuse).
+//   feedforward_mNm = T_ff; max_torque_mNm = |T| clamp (0 => board default).
+//   stop/limits/scales ignored.
 struct ServoRequest
 {
   uint8_t control;     // kServoCtrl*
@@ -295,8 +303,8 @@ struct ServoRequest
   uint16_t timeout_ms; // reserved for future position-timeout policy
   int32_t position_mrad;
   int32_t velocity_mrad_s;
-  int32_t id_mA;
-  int32_t iq_mA;
+  int32_t id_mA;       // current mode: Id; MIT: Kp mNm/rad
+  int32_t iq_mA;       // current mode: Iq; MIT: Kd mNm/(rad/s)
   int32_t stop_position_mrad;
   int32_t max_torque_mNm;
   int32_t feedforward_mNm;

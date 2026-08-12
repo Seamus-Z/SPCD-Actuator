@@ -118,6 +118,26 @@ class ServoCommandProtocolTest(unittest.TestCase):
              1000, 1000, 1000, 0),
         )
 
+    def test_pack_mit_mode(self):
+        frame = xt_proto.pack_mit(
+            position_rad=12.5,
+            velocity_rad_s=-1.25,
+            kp=3.5,
+            kd=0.2,
+            feedforward_nm=0.05,
+            max_torque_nm=0.8,
+            seq=4,
+        )
+        self.assertEqual(
+            struct.unpack(self._FMT, frame),
+            (xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CMD, 4,
+             xt_proto.CMD_SERVO, xt_proto.SERVO_CTRL_MIT, 0, 0,
+             12500, -1250, 3500, 200,
+             xt_proto.POSITION_NAN_MRAD, 800, 50,
+             xt_proto.POSITION_NAN_MRAD, xt_proto.POSITION_NAN_MRAD,
+             1000, 1000, 1000, 0),
+        )
+
 
 class GuiControlStreamTest(unittest.TestCase):
     _FMT = "<BBBBBBBHiiiiiiiiiHHHH"

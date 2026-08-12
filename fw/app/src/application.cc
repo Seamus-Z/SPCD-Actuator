@@ -50,6 +50,7 @@ Application::Application(::pool::Pool* pool)
       dq_modulator_(pool, board::DqModulatorOptions()),
       foc_(pool, board::FocControllerOptions()),
       servo_mode_(pool, board::ServoModeOptions()),
+      mit_mode_(pool, board::MitModeOptions()),
       encoder_(pool, timer_.get(), board::EncoderOptions()),
       calibration_(&encoder_, foc_.get(), servo_mode_.get(), phase_pwm_.get()),
       binary_link_(pool, can_.get(), kDefaultCanId)
@@ -98,6 +99,10 @@ uint8_t Application::StartServo(
     return telemetry::xt_can::kStatusOk;
   }
 
+  if (mit_mode_.get() != nullptr)
+  {
+    mit_mode_->Stop();
+  }
   dq_modulator_->Stop();
   phase_pwm_->DisableControlIsr();
 
@@ -163,6 +168,10 @@ uint8_t Application::StartCurrent(float id_A, float iq_A)
   {
     servo_mode_->Stop();
   }
+  if (mit_mode_.get() != nullptr)
+  {
+    mit_mode_->Stop();
+  }
   dq_modulator_->Stop();
   phase_pwm_->DisableControlIsr();
 
@@ -196,6 +205,73 @@ uint8_t Application::StartCurrent(float id_A, float iq_A)
   gate_driver_->PowerOn();
   pwm_output_on_ = true;
   mode_ = telemetry::xt_can::kModeCurrent;
+  StartControlIsr();
+  return telemetry::xt_can::kStatusOk;
+}
+
+uint8_t Application::StartMit(const math::servo_mode::MitMode::Command& command_in)
+{
+  if (state_ != State::RUN || phase_pwm_->init_ok() == false)
+  {
+    return telemetry::xt_can::kStatusNotRun;
+  }
+  if (!encoder_.valid() || mit_mode_.get() == nullptr || foc_.get() == nullptr)
+  {
+    return telemetry::xt_can::kStatusFail;
+  }
+
+  math::servo_mode::MitMode::Command command = command_in;
+  // Multi-turn continuous: do NOT wrap/shortest-path remap.
+
+  if (mode_ == telemetry::xt_can::kModeMit &&
+      mit_mode_->active() && foc_->active())
+  {
+    mit_mode_->SetCommand(command);
+    foc_->SetRefs(0.0f, foc_->iq_ref_A());
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                   encoder_.pll().velocity_mech());
+    return telemetry::xt_can::kStatusOk;
+  }
+
+  if (servo_mode_.get() != nullptr)
+  {
+    servo_mode_->Stop();
+  }
+  dq_modulator_->Stop();
+  phase_pwm_->DisableControlIsr();
+
+  encoder_.SampleBlocking();
+  encoder_.ResetPll();
+  mit_mode_->Start(command);
+
+  const float theta_elec = encoder_.sample().electrical_rad;
+  math::foc::FocController::Command cmd;
+  cmd.theta_rad = theta_elec;
+  cmd.id_A = 0.0f;
+  cmd.iq_A = 0.0f;
+  cmd.theta_rate_rad_s = 0.0f;
+  foc_->Start(cmd);
+  foc_->SetOmega(encoder_.pll().omega_elec(),
+                 encoder_.pll().velocity_mech());
+
+  last_current_ = current_adc_->ReadLatest();
+  math::foc::FocController::Duties duties;
+  if (foc_->Step(0.0f, last_current_.i1_A,
+                 last_current_.i2_A,
+                 last_current_.i3_A, &duties,
+                 &theta_elec) == false)
+  {
+    foc_->Stop();
+    mit_mode_->Stop();
+    return telemetry::xt_can::kStatusFail;
+  }
+  id_A_ = foc_->id_A();
+  iq_A_ = foc_->iq_A();
+  dq_valid_ = last_current_.ok;
+  phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+  gate_driver_->PowerOn();
+  pwm_output_on_ = true;
+  mode_ = telemetry::xt_can::kModeMit;
   StartControlIsr();
   return telemetry::xt_can::kStatusOk;
 }
@@ -338,6 +414,10 @@ void Application::StopOutput()
   {
     servo_mode_->Stop();
   }
+  if (mit_mode_.get() != nullptr)
+  {
+    mit_mode_->Stop();
+  }
   if (foc_.get() != nullptr)
   {
     foc_->Stop();
@@ -399,6 +479,11 @@ void Application::ControlIsrStep()
   const bool vel_on =
       servo_mode_.get() != nullptr && servo_mode_->active() &&
       !bemf_on && !cogging_on;
+  const bool mit_on =
+      mode_ == telemetry::xt_can::kModeMit &&
+      mit_mode_.get() != nullptr && mit_mode_->active() &&
+      foc_.get() != nullptr && foc_->active() &&
+      !bemf_on && !cogging_on && !cal_on && !r_on && !l_on;
   const bool current_on =
       mode_ == telemetry::xt_can::kModeCurrent &&
       foc_.get() != nullptr && foc_->active() &&
@@ -410,7 +495,8 @@ void Application::ControlIsrStep()
   }
 
   const bool control_active =
-      vel_on || current_on || cal_on || bemf_on || r_on || l_on || cogging_on;
+      vel_on || mit_on || current_on || cal_on || bemf_on || r_on || l_on ||
+      cogging_on;
 
   // Prefer measured ISR period. Nominal period_s() can disagree with real UEV
   // spacing; that scales PLL ω and makes vel PID think it is already tracking.
@@ -726,6 +812,41 @@ void Application::ControlIsrStep()
     gate_driver_->PowerOn();
     pwm_output_on_ = true;
   }
+  else if (mit_on)
+  {
+    // MIT impedance: T=Kp(e_p)+Kd(e_v)+T_ff → Iq. Multi-turn continuous pos.
+    if (!encoder_.valid() || !encoder_.pll().theta_valid())
+    {
+      mit_mode_->Stop();
+      foc_->Stop();
+      if (gate_driver_.get() != nullptr)
+      {
+        gate_driver_->PowerOff();
+      }
+      pwm_output_on_ = false;
+      dq_valid_ = false;
+      mode_ = telemetry::xt_can::kModeStop;
+      return;
+    }
+    const float iq = mit_mode_->Step(
+        dt_s, encoder_.pll().position_rad(), encoder_.pll().velocity_mech());
+    foc_->SetRefs(0.0f, iq + encoder_.CoggingCurrentCompensation());
+    foc_->SetOmega(encoder_.pll().omega_elec(),
+                            encoder_.pll().velocity_mech());
+    const float theta_elec = encoder_.pll().electrical_theta();
+    math::foc::FocController::Duties duties;
+    if (!foc_->Step(dt_s, sample.i1_A, sample.i2_A, sample.i3_A,
+                             &duties, &theta_elec))
+    {
+      return;
+    }
+    id_A_ = foc_->id_A();
+    iq_A_ = foc_->iq_A();
+    dq_valid_ = sample.ok;
+    phase_pwm_->SetDuty(duties.a_milli, duties.b_milli, duties.c_milli);
+    gate_driver_->PowerOn();
+    pwm_output_on_ = true;
+  }
   else if (vel_on)
   {
     // moteus position/velocity: PID → Iq, encoder θ_e commutation.
@@ -839,7 +960,8 @@ telemetry::xt_can::Telemetry Application::BuildTelemetry() const
   }
   if (encoder_.valid() && encoder_.pll().theta_valid() &&
       (mode_ == telemetry::xt_can::kModeServo ||
-       mode_ == telemetry::xt_can::kModeCurrent))
+       mode_ == telemetry::xt_can::kModeCurrent ||
+       mode_ == telemetry::xt_can::kModeMit))
   {
     t.flags = static_cast<uint16_t>(t.flags | telemetry::xt_can::kFlagEncMode);
   }
@@ -1131,8 +1253,17 @@ telemetry::xt_can::EncTelem Application::BuildEncTelem() const
   }
   const auto& encoder_sample = encoder_.sample();
   e.raw = encoder_sample.raw;
-  e.theta_mech_mrad =
-      static_cast<int32_t>(encoder_sample.mechanical_rad * 1000.0f);
+  // MIT uses continuous multi-turn unwrap so Live can track P_cmd/P_fdb.
+  if (mode_ == telemetry::xt_can::kModeMit && encoder_.pll().theta_valid())
+  {
+    e.theta_mech_mrad =
+        static_cast<int32_t>(encoder_.pll().position_rad() * 1000.0f);
+  }
+  else
+  {
+    e.theta_mech_mrad =
+        static_cast<int32_t>(encoder_sample.mechanical_rad * 1000.0f);
+  }
   e.theta_elec_mrad =
       static_cast<int32_t>(encoder_sample.electrical_rad * 1000.0f);
   e.sign = encoder_.calibration().sign >= 0.0f ? 1 : -1;
@@ -1170,7 +1301,8 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   }
   if (encoder_.valid() && encoder_.pll().theta_valid() &&
       (mode_ == telemetry::xt_can::kModeServo ||
-       mode_ == telemetry::xt_can::kModeCurrent))
+       mode_ == telemetry::xt_can::kModeCurrent ||
+       mode_ == telemetry::xt_can::kModeMit))
   {
     r.flags = static_cast<uint16_t>(r.flags | telemetry::xt_can::kFlagEncMode);
   }
@@ -1192,7 +1324,17 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   r.vq_mV = 0;
   r.bus_mV = static_cast<uint16_t>(board::kBusVoltage_V * 1000.0f + 0.5f);
   r.enc_raw = 0;
-  r.theta_mech_mrad = static_cast<int32_t>(encoder_.sample().mechanical_rad * 1000.0f);
+  // Servo/Current keep single-turn sensor angle; MIT reports continuous unwrap.
+  if (mode_ == telemetry::xt_can::kModeMit && encoder_.pll().theta_valid())
+  {
+    r.theta_mech_mrad =
+        static_cast<int32_t>(encoder_.pll().position_rad() * 1000.0f);
+  }
+  else
+  {
+    r.theta_mech_mrad =
+        static_cast<int32_t>(encoder_.sample().mechanical_rad * 1000.0f);
+  }
   r.omega_cmd_mrad_s = 0;
   r.omega_elec_mrad_s = 0;
   r.voltage_headroom_mV = 0;
@@ -1240,6 +1382,11 @@ telemetry::xt_can::CtrlReply Application::BuildCtrlReply(uint8_t cmd, uint8_t se
   {
     r.omega_cmd_mrad_s =
         static_cast<int32_t>(servo_mode_->velocity_cmd() * 1000.0f);
+  }
+  else if (mit_mode_.get() != nullptr && mit_mode_->active())
+  {
+    r.omega_cmd_mrad_s =
+        static_cast<int32_t>(mit_mode_->velocity_cmd_rad_s() * 1000.0f);
   }
   else if (foc_.get() != nullptr && foc_->active())
   {
@@ -1540,6 +1687,28 @@ void Application::ApplyRuntimeConfig()
     }
     opts.max_torque_Nm = opts.torque_constant_Nm_A * opts.max_iq_A;
     servo_mode_->SetOptions(opts);
+  }
+
+  if (mit_mode_.get() != nullptr)
+  {
+    auto mopts = board::MitModeOptions();
+    mopts.max_iq_A = servo_c.max_iq_A;
+    if (mopts.max_iq_A > motor.max_phase_current_A)
+    {
+      mopts.max_iq_A = motor.max_phase_current_A;
+    }
+    mopts.torque_constant_Nm_A = board::VendorTorqueConstantNmPerA(
+        [&]() {
+          device::motor::Params p = board::MotorParams();
+          p.bemf_Vpeak_per_krpm = motor.bemf_Vpeak_per_krpm;
+          return p;
+        }());
+    if (mopts.torque_constant_Nm_A < 0.05f)
+    {
+      mopts.torque_constant_Nm_A = 0.1f;
+    }
+    mopts.max_torque_Nm = mopts.torque_constant_Nm_A * mopts.max_iq_A;
+    mit_mode_->SetOptions(mopts);
   }
 }
 

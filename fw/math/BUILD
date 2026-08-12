@@ -43,6 +43,7 @@ cc_library(
         "inc/math/servo_mode/pid.h",
         "inc/math/servo_mode/encoder_pll.h",
         "inc/math/servo_mode/servo_mode.h",
+        "inc/math/servo_mode/mit_mode.h",
     ],
     includes = ["inc"],
     deps = [":base", ":foc"],

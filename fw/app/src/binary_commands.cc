@@ -172,6 +172,21 @@ uint8_t Application::HandleServo(const uint8_t* payload, size_t payload_len)
   {
     return this->StartCurrent(MilliToAmps(req.id_mA), MilliToAmps(req.iq_mA));
   }
+  if (req.control == telemetry::xt_can::kServoCtrlMit)
+  {
+    math::servo_mode::MitMode::Command command{};
+    // Multi-turn continuous: position_mrad is absolute, never NaN-mapped here.
+    command.position_rad = static_cast<float>(req.position_mrad) * 0.001f;
+    command.velocity_rad_s = static_cast<float>(req.velocity_mrad_s) * 0.001f;
+    // id_mA/iq_mA reused as Kp/Kd in milli-Nm units.
+    command.kp_nm_per_rad = static_cast<float>(req.id_mA) * 0.001f;
+    command.kd_nm_s_per_rad = static_cast<float>(req.iq_mA) * 0.001f;
+    command.feedforward_Nm = static_cast<float>(req.feedforward_mNm) * 0.001f;
+    command.max_torque_Nm = (req.max_torque_mNm <= 0)
+                                ? math::foc::QuietNan()
+                                : static_cast<float>(req.max_torque_mNm) * 0.001f;
+    return this->StartMit(command);
+  }
   if (req.control != telemetry::xt_can::kServoCtrlPosition)
   {
     return telemetry::xt_can::kStatusBadCmd;

@@ -786,6 +786,23 @@ document.getElementById("btnCurrent").onclick = () => {
     iq: Number(document.getElementById("iqA").value),
   });
 };
+document.getElementById("btnMit").onclick = () => {
+  const body = {
+    op: "mit",
+    position: Number(document.getElementById("mitPos").value),
+    velocity: Number(document.getElementById("mitVel").value),
+    kp: Number(document.getElementById("mitKp").value),
+    kd: Number(document.getElementById("mitKd").value),
+    feedforward: Number(document.getElementById("feedforwardNm").value || 0),
+  };
+  const maxTorque = optionalNumber("maxTorqueNm");
+  if (maxTorque !== null) body.max_torque = maxTorque;
+  if (![body.position, body.velocity, body.kp, body.kd].every(Number.isFinite)) {
+    statusEl.textContent = "MIT 参数无效";
+    return;
+  }
+  postCmd(body);
+};
 
 const calMethodEl = document.getElementById("calMethod");
 const calParamsEncEl = document.getElementById("calParamsEnc");

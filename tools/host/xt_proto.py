@@ -89,6 +89,7 @@ MODE_CURRENT = 3
 
 SERVO_CTRL_POSITION = 0
 SERVO_CTRL_CURRENT = 1
+SERVO_CTRL_MIT = 2
 # int32 sentinel for velocity mode (moteus position=NaN)
 POSITION_NAN_MRAD = -2147483648
 
@@ -210,6 +211,42 @@ def pack_current(id_a: float, iq_a: float, seq: int = 0) -> bytes:
         POSITION_NAN_MRAD,
         0,
         0,
+        POSITION_NAN_MRAD,
+        POSITION_NAN_MRAD,
+        1000,
+        1000,
+        1000,
+        0,
+    )
+
+
+def pack_mit(
+    position_rad: float,
+    velocity_rad_s: float = 0.0,
+    kp: float = 0.0,
+    kd: float = 0.0,
+    feedforward_nm: float = 0.0,
+    max_torque_nm: float | None = None,
+    seq: int = 0,
+) -> bytes:
+    """MIT impedance via kCmdServo: T=Kp(Pcmd-Pfdb)+Kd(Vcmd-Vfdb)+Tff.
+
+    Position is continuous multi-turn mechanical radians (no wrap).
+    Wire reuse: id_mA=Kp[mNm/rad], iq_mA=Kd[mNm/(rad/s)].
+    """
+    return pack_header(TYPE_CMD, seq) + struct.pack(
+        _SERVO_CMD_FMT,
+        CMD_SERVO,
+        SERVO_CTRL_MIT,
+        0,
+        0,
+        int(round(float(position_rad) * 1000.0)),
+        int(round(float(velocity_rad_s) * 1000.0)),
+        int(round(float(kp) * 1000.0)),
+        int(round(float(kd) * 1000.0)),
+        POSITION_NAN_MRAD,
+        0 if max_torque_nm is None else int(round(float(max_torque_nm) * 1000.0)),
+        int(round(float(feedforward_nm) * 1000.0)),
         POSITION_NAN_MRAD,
         POSITION_NAN_MRAD,
         1000,

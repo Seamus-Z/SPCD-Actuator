@@ -13,6 +13,7 @@
 #include "device/drv8353s.h"
 #include "math/foc/controller.h"
 #include "math/servo_mode/servo_mode.h"
+#include "math/servo_mode/mit_mode.h"
 #include "math/foc/modulator.h"
 #include "middleware/encoder/encoder_service.h"
 #include "middleware/calibration/calibration_manager.h"
@@ -36,6 +37,8 @@ class Application
   uint8_t StartServo(const math::servo_mode::ServoMode::Command& command);
   // Direct Id/Iq current mode (moteus kCurrent).
   uint8_t StartCurrent(float id_A, float iq_A);
+  // MIT impedance: T=Kp(Pcmd-Pfdb)+Kd(Vcmd-Vfdb)+Tff (multi-turn continuous).
+  uint8_t StartMit(const math::servo_mode::MitMode::Command& command);
 
   State state() const { return state_; }
   ::pool::Pool* pool() const { return pool_; }
@@ -127,6 +130,7 @@ class Application
   ::pool::PoolPtr<math::foc::DqModulator> dq_modulator_;
   ::pool::PoolPtr<math::foc::FocController> foc_;
   ::pool::PoolPtr<math::servo_mode::ServoMode> servo_mode_;
+  ::pool::PoolPtr<math::servo_mode::MitMode> mit_mode_;
   middleware::encoder::EncoderService encoder_;
   middleware::calibration::CalibrationManager calibration_;
   nvs::RuntimeConfig runtime_config_{};
