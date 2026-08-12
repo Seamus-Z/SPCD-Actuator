@@ -22,5 +22,6 @@ def bazel_toolchain_repository():
         repo = "mjbots/bazel-toolchain",
         commit = "9cc9535ef65a9361ba144be54d3f72c19346abf2",
         sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-        local_override = "/home/zzr/.cache/bazel/_bazel_zzr/f2961c8520cfcf5401a1e141bd11dfb6/external/com_github_mjbots_bazel_toolchain",
+        # Vendored working copy; workspace-relative for reproducible builds.
+        local_override = "third_party/bazel_toolchain",
     )

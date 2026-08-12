@@ -22,7 +22,9 @@ def rules_mbed_repository():
         repo = "mjbots/rules_mbed",
         commit = "1f8d9d36a60c302b8b3aab146118163bc638742d",
         sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-        local_override = "/home/zzr/.cache/bazel/_bazel_zzr/f2961c8520cfcf5401a1e141bd11dfb6/external/com_github_mjbots_rules_mbed",
+        # Vendored working copy (upstream commit + local arm-gcc 15.2 bump);
+        # workspace-relative so any machine can build after `git clone`.
+        local_override = "third_party/rules_mbed",
         patches = [
             "//tools/workspace:rules_mbed_mbedos.patch",
         ],

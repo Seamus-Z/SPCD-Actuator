@@ -5,11 +5,12 @@
 #include "drivers/DigitalOut.h"
 #include "hal/spi_api.h"
 #include "PinNames.h"
+#include "ports/platform_ports.h"
 
 namespace hal
 {
 
-class Stm32Spi
+class Stm32Spi final : public ports::ISpiBus
 {
  public:
   struct Options
@@ -34,13 +35,13 @@ class Stm32Spi
     spi->CR1 &= ~SPI_CR1_SPE;
   }
 
-  uint16_t write(uint16_t value)
+  uint16_t Transfer16(uint16_t value) override
   {
-    start_write(value);
-    return finish_write();
+    BeginTransfer16(value);
+    return FinishTransfer16();
   }
 
-  void start_write(uint16_t value)
+  void BeginTransfer16(uint16_t value) override
   {
     auto* const spi = spi_.spi.handle.Instance;
     cs_.write(0);
@@ -59,7 +60,7 @@ class Stm32Spi
     spi->CR1 |= SPI_CR1_SPE;
   }
 
-  uint16_t finish_write()
+  uint16_t FinishTransfer16() override
   {
     auto* const spi = spi_.spi.handle.Instance;
     uint16_t timeout = options_.timeout;

@@ -1,60 +1,34 @@
-// MagAlpha MA600 magnetic encoder over SPI (moteus-x1 AUX2 defaults).
+// MagAlpha MA600 magnetic encoder.
+// Platform SPI and delay implementations are injected by the board composition.
 #pragma once
 
 #include <cstdint>
 
-#include "HAL/millisecond_timer.h"
-#include "HAL/stm32_spi.h"
-#include "PinNames.h"
-#include "stm32g4xx_hal.h"
+#include "ports/angle_sensor.h"
+#include "ports/platform_ports.h"
 
 namespace device
 {
 
-class Ma600
+class Ma600 final : public ports::IAngleSensor
 {
  public:
-  static constexpr float kCpr = 65536.0f;
+  static constexpr uint32_t kCountsPerTurn = 65536u;
 
-  struct Options
+  struct Config
   {
-    PinName mosi = PA_11;  // AUX2.C
-    PinName miso = PA_10;  // AUX2.B
-    PinName sck = PF_1;    // AUX2.A
-    PinName cs = PB_7;     // AUX2.D
-    int frequency_hz = 6000000;
     uint16_t filter_us = 1024;
     uint8_t bct = 0;
     uint8_t enable_trim = 0;
   };
 
-  Ma600(hal::MillisecondTimer* timer, const Options& options)
-      : timer_(timer),
-        options_(options),
-        spi_([&]() {
-          hal::Stm32Spi::Options spi_opt;
-          spi_opt.mosi = options.mosi;
-          spi_opt.miso = options.miso;
-          spi_opt.sck = options.sck;
-          spi_opt.cs = options.cs;
-          spi_opt.frequency = options.frequency_hz;
-          spi_opt.width = 16;
-          spi_opt.mode = 0;
-          return spi_opt;
-        }())
+  Ma600(ports::ISpiBus* spi, ports::IDelay* delay, const Config& config)
+      : spi_(spi), delay_(delay), config_(config)
   {
   }
 
-  // Configure filter/BCT registers. Returns true on success.
-  // Note: do NOT reject angle==0 / 0xFFFF — a resting shaft can legitimately
-  // sit there; gating on that previously disabled all sampling/telemetry.
-  bool Init()
+  bool Init() override
   {
-    // Ensure AUX2 GPIO banks are clocked (PF1 SCK needs GPIOF).
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOF_CLK_ENABLE();
-
     error_ = WriteConfig();
     ok_ = !error_;
     if (ok_)
@@ -64,118 +38,99 @@ class Ma600
     return ok_;
   }
 
-  uint16_t Sample()
+  uint32_t Sample() override
   {
-    raw_ = spi_.write(0x0000);
+    if (spi_ == nullptr)
+    {
+      error_ = true;
+      return raw_;
+    }
+    raw_ = spi_->Transfer16(0x0000u);
     return raw_;
   }
 
-  void StartSample() { spi_.start_write(0x0000); }
-
-  uint16_t FinishSample()
+  void StartSample() override
   {
-    raw_ = spi_.finish_write();
+    if (spi_ == nullptr)
+    {
+      error_ = true;
+      return;
+    }
+    spi_->BeginTransfer16(0x0000u);
+  }
+
+  uint32_t FinishSample() override
+  {
+    if (spi_ == nullptr)
+    {
+      error_ = true;
+      return raw_;
+    }
+    raw_ = spi_->FinishTransfer16();
     return raw_;
   }
 
-  uint16_t raw() const { return raw_; }
-  bool ok() const { return ok_ && !error_; }
+  uint32_t raw() const override { return raw_; }
+  uint32_t counts_per_turn() const override { return kCountsPerTurn; }
+  bool ok() const override { return ok_ && !error_; }
   bool error() const { return error_; }
-  uint16_t filter_us() const { return options_.filter_us; }
+  uint16_t filter_us() const { return config_.filter_us; }
 
-  // Rewrites the MA600 filter register. Safe to call after Init().
-  bool SetFilterUs(uint16_t filter_us)
+  bool SetFilterUs(uint16_t filter_us) override
   {
-    options_.filter_us = filter_us;
+    config_.filter_us = filter_us;
     error_ = WriteConfig();
     ok_ = !error_;
     return ok_;
   }
 
-
  private:
-  // Returns true if configuration failed (matches moteus MA732::SetConfig).
   bool WriteConfig()
   {
-    if (timer_ == nullptr)
+    if (spi_ == nullptr || delay_ == nullptr)
     {
       return true;
     }
 
     const uint8_t desired_filter = [&]() -> uint8_t {
-      const auto filter_us = options_.filter_us;
-      if (filter_us == 0)
-      {
-        return 0;
-      }
-      if (filter_us <= 40)
-      {
-        return 5;
-      }
-      if (filter_us <= 80)
-      {
-        return 6;
-      }
-      if (filter_us <= 160)
-      {
-        return 7;
-      }
-      if (filter_us <= 320)
-      {
-        return 8;
-      }
-      if (filter_us <= 640)
-      {
-        return 9;
-      }
-      if (filter_us <= 1280)
-      {
-        return 10;
-      }
-      if (filter_us <= 2560)
-      {
-        return 11;
-      }
-      if (filter_us <= 5120)
-      {
-        return 12;
-      }
+      const auto filter_us = config_.filter_us;
+      if (filter_us == 0) return 0;
+      if (filter_us <= 40) return 5;
+      if (filter_us <= 80) return 6;
+      if (filter_us <= 160) return 7;
+      if (filter_us <= 320) return 8;
+      if (filter_us <= 640) return 9;
+      if (filter_us <= 1280) return 10;
+      if (filter_us <= 2560) return 11;
       return 12;
     }();
 
-    // FW = 0x0d[3:0]
-    if (SetRegister(0x0d, desired_filter))
-    {
-      return true;
-    }
-    if (SetRegister(0x02, options_.bct))
-    {
-      return true;
-    }
-    if (SetRegister(0x03, static_cast<uint8_t>(options_.enable_trim & 0x03)))
+    if (SetRegister(0x0d, desired_filter)) return true;
+    if (SetRegister(0x02, config_.bct)) return true;
+    if (SetRegister(0x03, static_cast<uint8_t>(config_.enable_trim & 0x03)))
     {
       return true;
     }
     return false;
   }
 
-  // MA600 write path (no read-back verify). Returns true on hard failure.
+  // Returns true if configuration failed (matches the existing driver contract).
   bool SetRegister(uint8_t reg, uint8_t desired)
   {
-    spi_.write(0xea54);
-    timer_->wait_us(2);
-    const uint16_t write_reg_cmd =
-        static_cast<uint16_t>((static_cast<uint16_t>(reg) << 8) | desired);
-    spi_.write(write_reg_cmd);
-    timer_->wait_us(2);
-    spi_.write(0x0000);
-    timer_->wait_us(2);
+    spi_->Transfer16(0xea54u);
+    delay_->WaitUs(2u);
+    const uint16_t command = static_cast<uint16_t>(
+        (static_cast<uint16_t>(reg) << 8) | desired);
+    spi_->Transfer16(command);
+    delay_->WaitUs(2u);
+    spi_->Transfer16(0x0000u);
+    delay_->WaitUs(2u);
     return false;
   }
 
-  hal::MillisecondTimer* timer_ = nullptr;
-  Options options_{};
-  hal::Stm32Spi spi_;
+  ports::ISpiBus* spi_ = nullptr;
+  ports::IDelay* delay_ = nullptr;
+  Config config_{};
   uint16_t raw_ = 0;
   bool ok_ = false;
   bool error_ = false;

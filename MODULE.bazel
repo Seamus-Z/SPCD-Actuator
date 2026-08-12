@@ -1,6 +1,4 @@
-###############################################################################
-# Bazel now uses Bzlmod by default to manage external dependencies.
-# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
-#
-# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
-###############################################################################
+# This project manages ALL external dependencies through WORKSPACE
+# (see .bazelrc `build --enable_workspace`). This file is intentionally
+# empty: Bazel 7 requires it to exist when Bzlmod is enabled by default.
+# Do NOT add dependencies here; add them in WORKSPACE / tools/workspace/.

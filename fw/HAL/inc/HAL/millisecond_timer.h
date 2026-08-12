@@ -3,6 +3,7 @@
 #pragma once
 
 #include "stm32g4xx_hal.h"
+#include "ports/platform_ports.h"
 
 // moteus-x1 uses TIM5 for motor PWM; relocate the us ticker to TIM15
 // (same override as moteus WORKSPACE MBED_US_TIMER_*).
@@ -19,7 +20,7 @@
 namespace hal
 {
 
-class MillisecondTimer
+class MillisecondTimer final : public ports::IDelay
 {
  public:
   MillisecondTimer()
@@ -67,6 +68,8 @@ class MillisecondTimer
   }
 
   void wait_ms(uint32_t delay_ms) { wait_us(delay_ms * 1000); }
+
+  void WaitUs(uint32_t delay_us) override { wait_us(delay_us); }
 
   void wait_us(uint32_t delay_us)
   {

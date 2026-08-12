@@ -38,6 +38,7 @@ cc_library(
     includes = ["inc"],
     deps = [
         ":system_clock",
+        "//fw/ports:ports",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],
     copts = BAREMETAL_COPTS,

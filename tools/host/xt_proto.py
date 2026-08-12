@@ -1,4 +1,4 @@
-# xtellar CAN-FD binary protocol (mirrors fw/telemetry/inc/telemetry/xt_can.h).
+# xtellar CAN-FD binary protocol (mirrors fw/protocol/inc/protocol/xt_can.h).
 from __future__ import annotations
 
 import struct

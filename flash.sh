@@ -7,7 +7,12 @@
 set -e
 
 COMBINED=bazel-bin/fw/xtellar.combined.bin
-OPENOCD=/home/zzr/openocd/xpack-openocd-0.12.0-7/bin/openocd
+# Override with OPENOCD=/path/to/openocd ./flash.sh; falls back to PATH.
+OPENOCD=${OPENOCD:-$(command -v openocd || true)}
+if [ -z "$OPENOCD" ] || [ ! -x "$OPENOCD" ]; then
+  echo "error: openocd not found. Install it (e.g. xpack-openocd) or set OPENOCD=/path/to/openocd" >&2
+  exit 1
+fi
 
 echo "=== Building combined bootloader + application image ==="
 tools/bazel build //fw:xtellar.combined

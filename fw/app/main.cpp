@@ -2,8 +2,8 @@
 #include <new>
 
 #include "HAL/system_clock.h"
-#include "application.h"
-#include "pool/pool.h"
+#include "board/xtellar_stm32g4/firmware_composition.h"
+#include "core/memory/pool.h"
 #include "stm32g4xx.h"
 
 namespace
@@ -11,8 +11,8 @@ namespace
 // Raw storage for the pool object itself (constructed after BSS init).
 // Cogging-compensation table (1024 int8) plus measurement accumulators live
 // inside Application, so the pool must be sized generously.
-alignas(::pool::SizedPool<40960>)
-    uint8_t g_pool_storage[sizeof(::pool::SizedPool<40960>)];
+alignas(::core::memory::SizedPool<40960>)
+    uint8_t g_pool_storage[sizeof(::core::memory::SizedPool<40960>)];
 
 void FaultLedInit()
 {
@@ -38,6 +38,21 @@ void FaultLedBlinkForever()
     }
   }
 }
+
+// Fault-context motor kill. TIM5 keeps generating PWM autonomously after the
+// CPU faults, so the gate drive must be cut with raw register writes before
+// anything else (C++ object state cannot be trusted here).
+// DRV8353S pins (board_config.h GateDriverOptions): HiZ = PC15, ENABLE = PC14.
+void KillMotorOutputRaw()
+{
+  TIM5->CCR1 = 0;
+  TIM5->CCR2 = 0;
+  TIM5->CCR3 = 0;
+  RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
+  __DSB();
+  GPIOC->BSRR = (1u << 15) << 16;  // HiZ low: gate outputs off
+  GPIOC->BSRR = (1u << 14) << 16;  // ENABLE low: driver disabled
+}
 }  // namespace
 
 extern "C"
@@ -49,8 +64,17 @@ extern uint32_t _sdata;
 extern uint32_t _edata;
 extern uint32_t _sidata;
 
-void AppDefault(void) { FaultLedBlinkForever(); }
-void AppHardFault(void) { FaultLedBlinkForever(); }
+void AppDefault(void)
+{
+  KillMotorOutputRaw();
+  FaultLedBlinkForever();
+}
+
+void AppHardFault(void)
+{
+  KillMotorOutputRaw();
+  FaultLedBlinkForever();
+}
 
 void AppReset(void)
 {
@@ -81,9 +105,9 @@ void AppReset(void)
   __enable_irq();
 
   // Bare-metal has no global ctor CRT: construct the pool explicitly.
-  auto* pool = new (g_pool_storage) ::pool::SizedPool<40960>();
-  ::pool::PoolPtr<app::Application> application(pool, pool);
-  application->Run();
+  auto* pool = new (g_pool_storage) ::core::memory::SizedPool<40960>();
+  ::core::memory::PoolPtr<app::board::FirmwareComposition> firmware(pool, pool);
+  firmware->Run();
 }
 
 }  // extern "C"

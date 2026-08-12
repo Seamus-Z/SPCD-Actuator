@@ -5,21 +5,18 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "HAL/millisecond_timer.h"
-#include "device/ma600.h"
 #include "math/cogging.h"
 #include "math/commutation.h"
 #include "math/constants.h"
 #include "math/encoder_comp.h"
 #include "math/servo_mode/encoder_pll.h"
-#include "pool/pool.h"
+#include "ports/angle_sensor.h"
 
 namespace middleware { namespace encoder {
 
 class EncoderService {
  public:
   struct Options {
-    device::Ma600::Options sensor;
     math::servo_mode::EncoderPll::Options pll;
   };
 
@@ -41,14 +38,12 @@ class EncoderService {
     bool valid = false;
   };
 
-  EncoderService(::pool::Pool* pool, hal::MillisecondTimer* timer,
-                 const Options& options)
-      : sensor_(pool, timer, options.sensor),
-        pll_(options.pll) {}
+  EncoderService(ports::IAngleSensor* sensor, const Options& options)
+      : sensor_(sensor), pll_(options.pll) {}
 
   bool Init()
   {
-    if (!sensor_->Init())
+    if (sensor_ == nullptr || !sensor_->Init())
     {
       return false;
     }
@@ -59,6 +54,11 @@ class EncoderService {
   // Non-ISR callers may synchronously acquire the angle.
   void SampleBlocking()
   {
+    if (sensor_ == nullptr)
+    {
+      sample_.valid = false;
+      return;
+    }
     spi_pending_ = false;
     sensor_->Sample();
     UpdateSampleFromRaw();
@@ -76,6 +76,11 @@ class EncoderService {
   // ISR order: Finish previous SPI transfer, update PLL, begin next transfer.
   void UpdatePwmIsr(float dt_s)
   {
+    if (sensor_ == nullptr)
+    {
+      sample_.valid = false;
+      return;
+    }
     if (spi_pending_)
     {
       sensor_->FinishSample();
@@ -98,7 +103,7 @@ class EncoderService {
     UpdatePllOutput();
   }
 
-  bool valid() const { return sensor_->ok(); }
+  bool valid() const { return sensor_ != nullptr && sensor_->ok(); }
   bool pll_valid() const { return pll_.theta_valid(); }
   const Sample& sample() const { return sample_; }
   const math::servo_mode::EncoderPll& pll() const { return pll_; }
@@ -110,7 +115,7 @@ class EncoderService {
 
   bool SetSensorFilterUs(uint16_t filter_us)
   {
-    if (sensor_.get() == nullptr)
+    if (sensor_ == nullptr)
     {
       return false;
     }
@@ -241,9 +246,18 @@ class EncoderService {
 
   void UpdateSampleFromRaw()
   {
-    sample_.raw = sensor_->raw();
-    sample_.counts_rad = math::WrapZeroToTwoPi(
-        static_cast<float>(sample_.raw) * (math::k2Pi / device::Ma600::kCpr));
+    if (sensor_ == nullptr)
+    {
+      sample_.valid = false;
+      return;
+    }
+    sample_.raw = static_cast<uint16_t>(sensor_->raw());
+    const uint32_t counts_per_turn = sensor_->counts_per_turn();
+    sample_.counts_rad = counts_per_turn > 0u
+        ? math::WrapZeroToTwoPi(
+              static_cast<float>(sample_.raw) *
+              (math::k2Pi / static_cast<float>(counts_per_turn)))
+        : 0.0f;
     sample_.mechanical_rad = math::WrapZeroToTwoPi(
         calibration_.sign * sample_.counts_rad + calibration_.offset_rad);
     const float commutation = calibration_.commutation_valid
@@ -265,7 +279,7 @@ class EncoderService {
         : 0.0f;
   }
 
-  ::pool::PoolPtr<device::Ma600> sensor_;
+  ports::IAngleSensor* sensor_ = nullptr;
   math::servo_mode::EncoderPll pll_;
   Calibration calibration_{};
   Calibration calibration_backup_{};

@@ -15,11 +15,7 @@ cc_library(
     name = "ma600",
     hdrs = ["inc/device/ma600.h"],
     includes = ["inc"],
-    deps = [
-        "//fw/HAL:hal",
-        "//fw/math:base",
-        "@com_github_ARMmbed_mbed-g4//:mbed",
-    ],
+    deps = ["//fw/ports:ports"],
     copts = [
         "-mcpu=cortex-m4",
         "-mthumb",
@@ -38,7 +34,7 @@ cc_library(
     includes = ["inc"],
     deps = [
         "//fw/HAL:hal",
-        "//fw/telemetry:text_format",
+        "//fw/core:text_format",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],
     copts = [
@@ -51,5 +47,8 @@ cc_library(
         "-g0",
         "-std=c++17",
     ],
-    visibility = ["//fw:__pkg__"],
+    visibility = [
+        "//fw:__pkg__",
+        "//fw/middleware:__pkg__",
+    ],
 )

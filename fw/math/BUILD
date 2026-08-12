@@ -1,14 +1,25 @@
 # Pure motor-control algorithms. These targets must not depend on HAL, device,
 # telemetry, NVS, or application code.
+#
+# Header-only and dependency-free, so the same targets build both for the
+# stm32g4 cross platform and for the host (unit tests: bazel test //fw/math:...).
 
-COPTS = [
-    "-mcpu=cortex-m4",
-    "-mthumb",
-    "-ffreestanding",
-    "-fno-exceptions",
-    "-fno-rtti",
-    "-std=c++17",
-]
+config_setting(
+    name = "bare_metal",
+    constraint_values = ["@platforms//os:none"],
+)
+
+COPTS = select({
+    ":bare_metal": [
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-ffreestanding",
+        "-fno-exceptions",
+        "-fno-rtti",
+        "-std=c++17",
+    ],
+    "//conditions:default": ["-std=c++17"],
+})
 
 cc_library(
     name = "base",
@@ -64,4 +75,62 @@ cc_library(
     deps = [":base"],
     copts = COPTS,
     visibility = ["//fw:__subpackages__"],
+)
+
+# ---- Host unit tests (run with: tools/bazel test //fw/math:all) ----
+
+TEST_COPTS = ["-std=c++17"]
+
+cc_test(
+    name = "pid_test",
+    size = "small",
+    srcs = ["test/pid_test.cc"],
+    deps = [
+        ":servo_mode",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = TEST_COPTS,
+)
+
+cc_test(
+    name = "mit_mode_test",
+    size = "small",
+    srcs = ["test/mit_mode_test.cc"],
+    deps = [
+        ":servo_mode",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = TEST_COPTS,
+)
+
+cc_test(
+    name = "encoder_pll_test",
+    size = "small",
+    srcs = ["test/encoder_pll_test.cc"],
+    deps = [
+        ":servo_mode",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = TEST_COPTS,
+)
+
+cc_test(
+    name = "servo_mode_test",
+    size = "small",
+    srcs = ["test/servo_mode_test.cc"],
+    deps = [
+        ":servo_mode",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = TEST_COPTS,
+)
+
+test_suite(
+    name = "math_tests",
+    tests = [
+        ":encoder_pll_test",
+        ":mit_mode_test",
+        ":pid_test",
+        ":servo_mode_test",
+    ],
 )

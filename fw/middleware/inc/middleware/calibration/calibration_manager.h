@@ -14,7 +14,7 @@
 #include "math/foc/controller.h"
 #include "math/servo_mode/servo_mode.h"
 #include "middleware/encoder/encoder_service.h"
-#include "nvs/encoder_cal_store.h"
+#include "middleware/persistence/motor_calibration_store.h"
 
 namespace middleware { namespace calibration {
 
@@ -28,8 +28,8 @@ class CalibrationManager {
 
   bool LoadPersistentConfig()
   {
-    nvs::MotorConfig data{};
-    if (!nvs::MotorConfigStore::Load(&data))
+    middleware::persistence::MotorCalibration data{};
+    if (!middleware::persistence::MotorCalibrationStore::Load(&data))
     {
       return false;
     }
@@ -199,15 +199,23 @@ class CalibrationManager {
     return true;
   }
 
+  // True when PersistPending() would erase/write flash on its next call.
+  // The caller must cut motor output first: page erase stalls the CPU for
+  // tens of ms while the PWM timer keeps driving the last duty cycle.
+  bool has_pending_persist() const
+  {
+    return encoder_dirty_ || bemf_dirty_ || resistance_dirty_ ||
+           inductance_dirty_ || cogging_dirty_ || compensation_dirty_;
+  }
+
   void PersistPending()
   {
-    if (!encoder_dirty_ && !bemf_dirty_ && !resistance_dirty_ &&
-        !inductance_dirty_ && !cogging_dirty_ && !compensation_dirty_)
+    if (!has_pending_persist())
     {
       return;
     }
-    nvs::MotorConfig data{};
-    nvs::MotorConfigStore::Load(&data);
+    middleware::persistence::MotorCalibration data{};
+    middleware::persistence::MotorCalibrationStore::Load(&data);
     if (encoder_dirty_ && encoder_ != nullptr)
     {
       const auto calibration = encoder_->calibration();
@@ -249,7 +257,7 @@ class CalibrationManager {
     {
       phase_pwm_->DisableControlIsr();
     }
-    const bool saved = nvs::MotorConfigStore::Save(data);
+    const bool saved = middleware::persistence::MotorCalibrationStore::Save(data);
     if (encoder_dirty_) encoder_persisted_ = saved;
     if (bemf_dirty_) bemf_persisted_ = saved;
     if (resistance_dirty_) resistance_persisted_ = saved;

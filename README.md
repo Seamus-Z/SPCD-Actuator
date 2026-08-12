@@ -26,31 +26,34 @@ STM32G474 无刷电机驱动器固件（FOC + 编码器闭环）与配套上位�
 
 ```
 fw/                     固件（Bazel 构建）
-├── app/                应用编排层：主循环、控制 ISR、命令分发
-│   ├── main.cpp        CRT 入口（手写 BSS/data 初始化 + 静态 pool 构造）
-│   ├── inc/board_config.h   板级引脚 / 电气默认值 / 各模块 Options 工厂
-│   └── src/
-│       ├── application.cc      状态机、控制 ISR、模式切换、遥测组包
-│       └── binary_commands.cc  CAN 命令解析（Servo/Cal/Snap/Conf/Info）
-├── HAL/                裸机外设封装：FDCAN、PWM、电流 ADC、SPI、定时器、时钟
-├── device/             器件驱动：DRV8353S、MA600、电机参数表
-├── math/               纯算法层（无 HAL / 无 IO 依赖，全 header-only）
-│   ├── foc/            Park/Clarke、PI、电流环、DQ 调制器
-│   ├── servo_mode/     编码器 PLL、位置 PID、轨迹生成、MIT 阻抗
-│   └── calibration/    编码器相位、R、Ld/Lq、Ke、齿槽辨识算法
-├── middleware/         业务服务：编码器服务、标定管理器（唯一可跨 device+math 的层）
-├── nvs/                Flash 持久化：标定存储、运行时配置存储
-├── telemetry/          CAN 线格式定义（xt_can.h）与链路层（binary_link）
-├── bootloader/         独立 CAN 引导加载器（16 KB）
-├── pool/               静态内存池（无堆分配）
-└── protocol/           旧 include 路径兼容 shim
+├── app/                 顶层生命周期：初始化、FSM、主循环与安全策略
+├── board/xtellar_stm32g4/
+│   └── firmware_composition.*  唯一对象组合根与 STM32G4 平台实现
+├── core/                与业务无关的静态内存池、文本格式化
+├── protocol/            稳定 CAN wire ABI（xt_can.h）
+├── ports/               ISpiBus、IAngleSensor 等平台无关端口
+├── middleware/          业务服务与适配器
+│   ├── control/         15 kHz 控制会话与 ISR
+│   ├── encoder/         编码器采样与 PLL
+│   ├── calibration/     标定编排
+│   ├── snapshot/        PWM 率快照
+│   ├── communication/   CAN 命令、遥测与 BinaryLink
+│   ├── config/          运行配置数据模型
+│   └── persistence/     Flash 配置与标定存储
+├── HAL/                 裸机外设封装：FDCAN、PWM、电流 ADC、SPI、定时器、时钟
+├── device/              器件驱动：DRV8353S、MA600、电机参数表
+├── math/                纯算法层（无 HAL / 无 IO 依赖，全 header-only）
+│   ├── foc/             Park/Clarke、PI、电流环、DQ 调制器
+│   ├── servo_mode/      编码器 PLL、位置 PID、轨迹生成、MIT 阻抗
+│   └── calibration/     编码器相位、R、Ld/Lq、Ke、齿槽辨识算法
+└── bootloader/          独立 CAN 引导加载器（16 KB）
 
 tools/
-├── bazel               Bazel 版本包装器
-└── host/               上位机
-    ├── xt_proto.py     协议打包 / 解包（与 xt_can.h 对应）
+├── bazel                Bazel 版本包装器
+└── host/                上位机
+    ├── xt_proto.py      协议打包 / 解包（与 xt_can.h 对应）
     ├── test_xt_proto.py 协议单元测试
-    ├── gui/            本地 Web 上位机（HTTP + 静态页面）
+    ├── gui/             本地 Web 上位机（HTTP + 静态页面）
     ├── snap_analysis.py     快照频域分析
     └── compensate_encoder.py 编码器几何补偿生成
 
@@ -68,30 +71,27 @@ hw/x1/                  KiCad 硬件工程
         └─────────────────────────────┼────────────────┘
                                       │ CAN-FD
         ┌─────────────────────────────┼────────────────┐
-        │  telemetry/binary_link  ←→  xt_can (wire ABI)│
+        │  protocol/xt_can  ←→  middleware/communication│
         ├──────────────────────────────────────────────┤
-        │  app/  Application                           │
-        │    · 主循环 RunOnce()      · 控制 ISR 15 kHz  │
-        │    · 命令分发              · 模式状态机       │
+        │  app/Application：初始化 · FSM · 主循环 · 安全策略│
         ├──────────────────────────────────────────────┤
-        │  middleware/  EncoderService · CalibrationMgr │
+        │  middleware：control · encoder · calibration │
+        │              snapshot · config · persistence │
         ├───────────────────────┬──────────────────────┤
   MCU   │  math/  (纯算法)      │  device/  (器件驱动)  │
         │  FOC · ServoMode      │  DRV8353S · MA600     │
         │  MitMode · Cal        │                       │
         ├───────────────────────┴──────────────────────┤
-        │  HAL/  FDCAN · PhasePwm · CurrentAdc · SPI    │
-        ├──────────────────────────────────────────────┤
-        │  nvs/  Flash  ·  pool/  静态内存池            │
+        │  core/ · ports/ · HAL/                       │
         └──────────────────────────────────────────────┘
 ```
 
 **依赖规则**（由 Bazel `visibility` 与 BUILD 注释约束）：
 
-- `math/` 不得依赖 HAL、device、telemetry、nvs、app —— 保持纯算法、可移植、可离线测试
-- `middleware/` 是唯一允许同时依赖 device/HAL 与 math 的层
-- `app/` 只编排 middleware 与 math，不直接碰寄存器
-- `telemetry/xt_can.h` 是固件与上位机的**唯一线格式真源**，`tools/host/xt_proto.py` 与之一一对应
+- `math/` 不得依赖 HAL、device、middleware、protocol、app —— 保持纯算法、可移植、可离线测试
+- `middleware/` 是唯一允许同时依赖 device/HAL 与 math 的业务层；通信和 Flash 适配器也归此层
+- `application_core` 只编排 middleware 服务，不直接碰寄存器或 wire DTO
+- `protocol/xt_can.h` 是固件侧**唯一线格式真源**，`tools/host/xt_proto.py` 与之一一对应
 
 ### 执行模型
 
@@ -99,8 +99,8 @@ hw/x1/                  KiCad 硬件工程
 
 | 上下文 | 频率 | 职责 |
 |---|---|---|
-| TIM5 控制 ISR（优先级 2） | 15 kHz | 采样电流/编码器 → 外环（Servo/MIT/标定）→ FOC 电流环 → PWM 占空比 |
-| 主循环 `RunOnce()` | 尽力而为 | CAN 收发、遥测组包、Flash 写入、栅驱故障检查、快照搬运 |
+| TIM5 控制 ISR（优先级 2） | 15 kHz | `MotorControlService::StepIsr()`：采样 → 外环 → FOC → PWM |
+| 主循环 `Application::Run()` | 尽力而为 | 喂狗、状态机、命令/遥测服务轮询、Flash 持久化 |
 
 Flash 擦写前主动关闭控制 ISR，避免写 Flash 阻塞造成控制周期抖动。
 
@@ -290,7 +290,7 @@ python3 tools/host/compensate_encoder.py     # 离线生成编码器补偿表
 
 ## 11. 当前版本
 
-固件语义化版本由 `fw/telemetry/inc/telemetry/xt_can.h` 的 `kFwMajor/Minor/Patch` 定义，
+固件语义化版本由 `fw/protocol/inc/protocol/xt_can.h` 的 `kFwMajor/Minor/Patch` 定义，
 经 `kCmdInfo` 上报，上位机连接时显示。
 
 **当前：0.6.6**（新增 MIT 阻抗模式）

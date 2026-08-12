@@ -1,5 +1,15 @@
 workspace(name = "xtellar_mbed")
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# --- googletest: host-side unit tests for //fw/math (run with --config=host) ---
+http_archive(
+    name = "com_google_googletest",
+    urls = ["https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz"],
+    strip_prefix = "googletest-release-1.12.1",
+    sha256 = "81964fe578e9bd7c94dfdb09c8e4d6e6759e19967e397dbea48d1c10e45d0df2",
+)
+
 BAZEL_VERSION = "7.4.1"
 BAZEL_VERSION_SHA = "c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b"
 
@@ -11,19 +21,12 @@ load("//tools/workspace/bazel_toolchain:repository.bzl", "bazel_toolchain_reposi
 rules_mbed_repository()
 load("@com_github_mjbots_rules_mbed//:rules.bzl", "mbed_register")
 
-# --- LLVM/Clang toolchain ---
+# --- Toolchain helper rules (vendored in third_party/) ---
+# Host targets (unit tests, tools) use Bazel's auto-detected local cc
+# toolchain; only the stm32g4 cross toolchain comes from rules_mbed.
 bazel_toolchain_repository()
 load("@com_github_mjbots_bazel_toolchain//toolchain:deps.bzl", "bazel_toolchain_dependencies")
 bazel_toolchain_dependencies()
-
-# Use locally cached LLVM from moteus build (no re-download)
-local_repository(
-    name = "llvm_toolchain",
-    path = "/home/zzr/.cache/bazel/_bazel_zzr/f2961c8520cfcf5401a1e141bd11dfb6/external/llvm_toolchain",
-)
-
-load("@llvm_toolchain//:toolchains.bzl", "llvm_register_toolchains")
-llvm_register_toolchains()
 
 # --- mbed OS for STM32G474 ---
 mbed_register()

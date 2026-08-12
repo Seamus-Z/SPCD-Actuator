@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-#include "telemetry/text_format.h"
+#include "core/format/text_format.h"
 
 namespace device
 {
@@ -300,8 +300,8 @@ size_t Drv8353s::FormatTelemetry(char* out, size_t out_capacity)
   }
 
   // Hand-rolled to avoid newlib snprintf/_svfprintf stack usage.
-  using telemetry::text::AppendKeyHex;
-  using telemetry::text::AppendKeyUInt;
+  using core::text::AppendKeyHex;
+  using core::text::AppendKeyUInt;
   size_t pos = 0;
   pos = AppendKeyUInt(out, out_capacity, pos, "ok", init_ok_ ? 1u : 0u, false);
   pos = AppendKeyUInt(out, out_capacity, pos, "en", enabled_ ? 1u : 0u, true);

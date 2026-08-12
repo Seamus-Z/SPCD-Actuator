@@ -6,3 +6,9 @@ build --compiler=compiler
 build --nostart_end_lib
 build -c opt
 build --stamp
+
+# Host builds (unit tests): override the stm32g4 cross platform.
+build:host --platforms=@local_config_platform//:host
+
+# All tests run on the host (there are no on-target tests).
+test --config=host
