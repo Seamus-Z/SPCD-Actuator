@@ -235,7 +235,10 @@ void RuntimeConfigService::Apply()
   }
   if (motor_control_ != nullptr)
   {
-    motor_control_->SetOvercurrentTrip(motor.max_phase_current_A * 1.2f);
+    auto protection = ProtectionConfig();
+    protection.overcurrent_A = motor.max_phase_current_A * 1.2f;
+    protection.i2t_rated_A = motor.max_phase_current_A;
+    motor_control_->SetProtectionConfig(protection);
   }
 
   if (foc_ != nullptr)

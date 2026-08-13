@@ -4,6 +4,7 @@
 #include "HAL/millisecond_timer.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
+#include "HAL/vt_sense_adc.h"
 #include "HAL/stm32_spi.h"
 #include "application.h"
 #include "board/xtellar_stm32g4/board_config.h"
@@ -35,6 +36,7 @@ class FirmwareComposition::Impl
         can_(pool, CanOptions()),
         gate_driver_(pool, timer_.get(), GateDriverOptions()),
         current_adc_(pool, timer_.get(), CurrentSenseOptions()),
+        vt_sense_(pool, timer_.get(), VtSenseOptions()),
         phase_pwm_(pool, PhasePwmOptions()),
         dq_modulator_(pool, DqModulatorOptions()),
         foc_(pool, FocControllerOptions()),
@@ -48,9 +50,9 @@ class FirmwareComposition::Impl
         snapshot_(pool),
         motor_control_(pool, middleware::control::MotorControlService::Dependencies{
                                  timer_.get(), gate_driver_.get(), current_adc_.get(),
-                                 phase_pwm_.get(), dq_modulator_.get(), foc_.get(),
-                                 servo_mode_.get(), mit_mode_.get(), encoder_.get(),
-                                 calibration_.get(), snapshot_.get()}),
+                                 vt_sense_.get(), phase_pwm_.get(), dq_modulator_.get(),
+                                 foc_.get(), servo_mode_.get(), mit_mode_.get(),
+                                 encoder_.get(), calibration_.get(), snapshot_.get()}),
         runtime_config_(pool, RuntimeConfigService::Dependencies{
                                   encoder_.get(), calibration_.get(),
                                   motor_control_.get(), dq_modulator_.get(),
@@ -58,7 +60,7 @@ class FirmwareComposition::Impl
         binary_link_(pool, can_.get(), 1),
         platform_(pool, PlatformService::Dependencies{
                             timer_.get(), gate_driver_.get(), current_adc_.get(),
-                            phase_pwm_.get(), GateDriverConfig()}),
+                            vt_sense_.get(), phase_pwm_.get(), GateDriverConfig()}),
         telemetry_(pool, middleware::communication::TelemetryPublisher::Dependencies{
                              binary_link_.get(), motor_control_.get(), encoder_.get(),
                              calibration_.get(), snapshot_.get(),
@@ -83,6 +85,7 @@ class FirmwareComposition::Impl
   ::core::memory::PoolPtr<hal::FDCan> can_;
   ::core::memory::PoolPtr<device::Drv8353s> gate_driver_;
   ::core::memory::PoolPtr<hal::PhaseCurrentAdc> current_adc_;
+  ::core::memory::PoolPtr<hal::VtSenseAdc> vt_sense_;
   ::core::memory::PoolPtr<hal::PhasePwm> phase_pwm_;
   ::core::memory::PoolPtr<math::foc::DqModulator> dq_modulator_;
   ::core::memory::PoolPtr<math::foc::FocController> foc_;

@@ -180,7 +180,7 @@ class ControlReplyProtocolTest(unittest.TestCase):
             xt_proto.MAGIC, xt_proto.VERSION, xt_proto.TYPE_CTRL_REPLY, 9,
             xt_proto.CMD_SERVO, 0, 0, 4, 1, 1, 0,
             100, 200, 0, 3000, 700, 188_800, 1000, 12_000,
-            48_000, 1234, 500, 200_000, 2_643_200, 6_250,
+            48_000, 1234, 500, 200_000, 2_643_200, 625, 253,
         )
         result = xt_proto.parse_frame(frame)
         self.assertIsInstance(result, xt_proto.CtrlReply)
@@ -188,6 +188,7 @@ class ControlReplyProtocolTest(unittest.TestCase):
         self.assertAlmostEqual(result.omega_cmd_rad_s, 200.0)
         self.assertAlmostEqual(result.omega_elec_rad_s, 2643.2)
         self.assertAlmostEqual(result.voltage_headroom_v, 6.25)
+        self.assertAlmostEqual(result.fet_temp_c, 25.3)
 
     def test_decode_legacy_control_reply(self):
         frame = struct.pack(

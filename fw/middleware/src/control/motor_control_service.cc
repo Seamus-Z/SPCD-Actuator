@@ -37,6 +37,7 @@ MotorControlService::MotorControlService(const Dependencies& dependencies)
     : timer_(dependencies.timer),
       gate_driver_(dependencies.gate_driver),
       current_adc_(dependencies.current_adc),
+      vt_sense_(dependencies.vt_sense),
       phase_pwm_(dependencies.phase_pwm),
       dq_modulator_(dependencies.dq_modulator),
       foc_(dependencies.foc),
@@ -448,7 +449,6 @@ void MotorControlService::Stop()
     snapshot_->Abort();
   }
   last_control_us_ = 0;
-  overcurrent_count_ = 0;
   if (calibration_ != nullptr)
   {
     calibration_->Abort();
@@ -487,6 +487,7 @@ void MotorControlService::StartIsr()
   {
     return;
   }
+  safety_.Reset();
   last_control_us_ = 0;
   phase_pwm_->EnableControlIsr(&MotorControlService::IsrThunk, this);
 }
@@ -512,6 +513,74 @@ void MotorControlService::ObserveDq(
   id_A_ = dq.d;
   iq_A_ = dq.q;
   dq_valid_ = true;
+}
+
+bool MotorControlService::ApplyProtection(
+    const hal::PhaseCurrentAdc::Sample& sample, float dt_s)
+{
+  math::protection::SafetyMonitor::Input in;
+  in.current_ok = sample.ok;
+  in.i1_A = sample.i1_A;
+  in.i2_A = sample.i2_A;
+  in.i3_A = sample.i3_A;
+  in.dt_s = dt_s;
+  if (vt_sense_ != nullptr)
+  {
+    const auto vt = vt_sense_->ReadLatest();
+    in.bus_ok = vt.bus_ok;
+    in.bus_V = vt.bus_V;
+    in.fet_ok = vt.fet_ok;
+    in.fet_temp_C = vt.fet_temp_C;
+    fet_temp_ok_ = vt.fet_ok;
+    if (vt.fet_ok)
+    {
+      fet_temp_C_ = vt.fet_temp_C;
+    }
+    if (vt.bus_ok)
+    {
+      measured_bus_V_ = vt.bus_V;
+      if (foc_ != nullptr)
+      {
+        foc_->SetBusVoltage(vt.bus_V);
+      }
+      if (dq_modulator_ != nullptr)
+      {
+        dq_modulator_->SetBusVoltage(vt.bus_V);
+      }
+    }
+  }
+  if (safety_.Evaluate(in) != math::protection::Trip::None)
+  {
+    Stop();
+    return false;
+  }
+  return true;
+}
+
+void MotorControlService::SampleSlowTelemetry()
+{
+  if (vt_sense_ == nullptr)
+  {
+    return;
+  }
+  const auto vt = vt_sense_->ReadLatest();
+  fet_temp_ok_ = vt.fet_ok;
+  if (vt.fet_ok)
+  {
+    fet_temp_C_ = vt.fet_temp_C;
+  }
+  if (vt.bus_ok)
+  {
+    measured_bus_V_ = vt.bus_V;
+    if (foc_ != nullptr)
+    {
+      foc_->SetBusVoltage(vt.bus_V);
+    }
+    if (dq_modulator_ != nullptr)
+    {
+      dq_modulator_->SetBusVoltage(vt.bus_V);
+    }
+  }
 }
 
 void MotorControlService::StepIsr()
@@ -575,24 +644,9 @@ void MotorControlService::StepIsr()
 
   const auto sample = current_adc_->ReadLatest();
   last_current_ = sample;
-  if (sample.ok && overcurrent_trip_A_ > 0.0f)
+  if (!ApplyProtection(sample, dt_s))
   {
-    const float ia = sample.i1_A >= 0.0f ? sample.i1_A : -sample.i1_A;
-    const float ib = sample.i2_A >= 0.0f ? sample.i2_A : -sample.i2_A;
-    const float ic = sample.i3_A >= 0.0f ? sample.i3_A : -sample.i3_A;
-    if (ia > overcurrent_trip_A_ || ib > overcurrent_trip_A_ ||
-        ic > overcurrent_trip_A_)
-    {
-      if (++overcurrent_count_ >= kOvercurrentTripCount)
-      {
-        Stop();
-        return;
-      }
-    }
-    else
-    {
-      overcurrent_count_ = 0;
-    }
+    return;
   }
 
   if (encoder_->valid() || encoder_phase_active)

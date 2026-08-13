@@ -63,6 +63,17 @@ cc_library(
 )
 
 cc_library(
+    name = "protection",
+    hdrs = [
+        "inc/math/protection/thermistor.h",
+        "inc/math/protection/safety_monitor.h",
+    ],
+    includes = ["inc"],
+    copts = COPTS,
+    visibility = ["//fw:__subpackages__"],
+)
+
+cc_library(
     name = "calibration",
     hdrs = [
         "inc/math/calibration/encoder_phase.h",
@@ -115,6 +126,17 @@ cc_test(
 )
 
 cc_test(
+    name = "protection_test",
+    size = "small",
+    srcs = ["test/protection_test.cc"],
+    deps = [
+        ":protection",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = TEST_COPTS,
+)
+
+cc_test(
     name = "servo_mode_test",
     size = "small",
     srcs = ["test/servo_mode_test.cc"],
@@ -131,6 +153,7 @@ test_suite(
         ":encoder_pll_test",
         ":mit_mode_test",
         ":pid_test",
+        ":protection_test",
         ":servo_mode_test",
     ],
 )

@@ -56,6 +56,7 @@ void TelemetryPublisher::ReplyControl(uint8_t command, uint8_t sequence,
   if (!motor_control_->isr_enabled())
   {
     encoder_->SampleBlocking();
+    motor_control_->SampleSlowTelemetry();
   }
   link_->SendCtrlReply(
       BuildControlReply(command, sequence, status, driver_fault));
@@ -288,7 +289,7 @@ protocol::xt_can::CtrlReply TelemetryPublisher::BuildControlReply(
     reply.flags = static_cast<uint16_t>(reply.flags |
                                         protocol::xt_can::kFlagDqValid);
   }
-  if (driver_fault)
+  if (driver_fault || motor_control_->protection_tripped())
   {
     reply.flags = static_cast<uint16_t>(reply.flags |
                                         protocol::xt_can::kFlagFault);
@@ -315,8 +316,12 @@ protocol::xt_can::CtrlReply TelemetryPublisher::BuildControlReply(
   reply.enc_spike = spikes > 255u ? 255u : static_cast<uint8_t>(spikes);
   reply.id_mA = AmpsToMilli(motor_control_->id_A());
   reply.iq_mA = AmpsToMilli(motor_control_->iq_A());
-  reply.bus_mV = static_cast<uint16_t>(
-      runtime_config_->config().motor.bus_V * 1000.0f + 0.5f);
+  {
+    const float bus_V = motor_control_->measured_bus_V() > 1.0f
+                            ? motor_control_->measured_bus_V()
+                            : runtime_config_->config().motor.bus_V;
+    reply.bus_mV = static_cast<uint16_t>(bus_V * 1000.0f + 0.5f);
+  }
   reply.theta_mech_mrad = static_cast<int32_t>(
       ((mode == protocol::xt_can::kModeMit && encoder_->pll().theta_valid())
            ? encoder_->pll().position_rad()
@@ -340,8 +345,21 @@ protocol::xt_can::CtrlReply TelemetryPublisher::BuildControlReply(
     reply.vd_mV = static_cast<int32_t>(foc->vd_V() * 1000.0f);
     reply.vq_mV = static_cast<int32_t>(foc->vq_V() * 1000.0f);
     reply.bus_mV = static_cast<uint16_t>(foc->bus_V() * 1000.0f + 0.5f);
-    reply.voltage_headroom_mV =
-        static_cast<int32_t>(foc->voltage_headroom_V() * 1000.0f);
+    {
+      const float headroom_cV = foc->voltage_headroom_V() * 100.0f;
+      if (headroom_cV > 32767.0f)
+      {
+        reply.voltage_headroom_cV = 32767;
+      }
+      else if (headroom_cV < -32768.0f)
+      {
+        reply.voltage_headroom_cV = -32768;
+      }
+      else
+      {
+        reply.voltage_headroom_cV = static_cast<int16_t>(headroom_cV);
+      }
+    }
     reply.theta_elec_mrad = static_cast<int32_t>(
         (encoder_->valid() && encoder_->pll().theta_valid()
              ? encoder_->pll().electrical_theta()
@@ -389,6 +407,24 @@ protocol::xt_can::CtrlReply TelemetryPublisher::BuildControlReply(
     reply.omega_elec_mrad_s =
         static_cast<int32_t>(encoder_->pll().omega_elec() * 1000.0f);
   }
+  reply.fet_temp_dC = static_cast<int16_t>(-32768);
+  if (motor_control_->fet_temp_ok())
+  {
+    const float dC = motor_control_->fet_temp_C() * 10.0f;
+    if (dC > 32767.0f)
+    {
+      reply.fet_temp_dC = 32767;
+    }
+    else if (dC < -32767.0f)
+    {
+      reply.fet_temp_dC = static_cast<int16_t>(-32767);
+    }
+    else
+    {
+      reply.fet_temp_dC = static_cast<int16_t>(dC);
+    }
+  }
+
   return reply;
 }
 

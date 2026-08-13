@@ -202,7 +202,7 @@ PhaseCurrentAdc::Sample PhaseCurrentAdc::Read()
 PhaseCurrentAdc::Sample PhaseCurrentAdc::ReadLatest()
 {
   Sample sample;
-  if (!init_ok_ || !sync_on_)
+  if (!init_ok_ || !sync_on_ || !offset_ok_)
   {
     return sample;
   }

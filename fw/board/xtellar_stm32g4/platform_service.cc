@@ -10,6 +10,7 @@ PlatformService::PlatformService(const Dependencies& dependencies)
     : timer_(dependencies.timer),
       gate_driver_(dependencies.gate_driver),
       current_adc_(dependencies.current_adc),
+      vt_sense_(dependencies.vt_sense),
       phase_pwm_(dependencies.phase_pwm),
       gate_driver_config_(dependencies.gate_driver_config)
 {
@@ -44,7 +45,11 @@ bool PlatformService::InitializeGateDriver()
 
 bool PlatformService::InitializeCurrentSense()
 {
-  return current_adc_ != nullptr && current_adc_->Init();
+  if (current_adc_ == nullptr || !current_adc_->Init())
+  {
+    return false;
+  }
+  return vt_sense_ != nullptr && vt_sense_->Init();
 }
 
 bool PlatformService::CalibrateCurrentOffset()
@@ -61,6 +66,10 @@ bool PlatformService::StartSynchronizedCurrentSampling()
 {
   if (current_adc_ == nullptr || phase_pwm_ == nullptr ||
       !current_adc_->StartPwmSync())
+  {
+    return false;
+  }
+  if (vt_sense_ == nullptr || !vt_sense_->StartPwmSync())
   {
     return false;
   }

@@ -935,6 +935,7 @@ class CtrlReply:
     omega_cmd_rad_s: float = 0.0
     omega_elec_rad_s: float = 0.0
     voltage_headroom_v: float = 0.0
+    fet_temp_c: float | None = None
 
     @property
     def pwm_on(self) -> bool:
@@ -1108,7 +1109,7 @@ assert struct.calcsize(_CAL_FMT) == 20
 # The first 56 bytes retain the original layout. Firmware >=0.4.10 appends
 # measured electrical speed and available DQ voltage headroom (64 bytes total).
 _CTRL_BASE_FMT = "<BBBBBBHBBbBiiiiiiiiHHii"
-_CTRL_FMT = _CTRL_BASE_FMT + "ii"
+_CTRL_FMT = _CTRL_BASE_FMT + "ihh"
 assert struct.calcsize(_CTRL_BASE_FMT) == 56
 assert struct.calcsize(_CTRL_FMT) == 64
 
@@ -1269,7 +1270,14 @@ def parse_frame(data: bytes) -> Optional[object]:
             theta_mech_rad=fields[21] / 1000.0,
             omega_cmd_rad_s=fields[22] / 1000.0,
             omega_elec_rad_s=fields[23] / 1000.0 if len(fields) > 23 else 0.0,
-            voltage_headroom_v=fields[24] / 1000.0 if len(fields) > 24 else 0.0,
+            voltage_headroom_v=(
+                fields[24] / 100.0 if len(fields) > 24 else 0.0
+            ),
+            fet_temp_c=(
+                None
+                if len(fields) <= 25 or int(fields[25]) <= -32767
+                else fields[25] / 10.0
+            ),
         )
     if typ == TYPE_CAL and len(data) >= 20:
         fields = struct.unpack_from(_CAL_FMT, data, 0)

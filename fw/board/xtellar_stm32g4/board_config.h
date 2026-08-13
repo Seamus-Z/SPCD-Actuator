@@ -5,6 +5,8 @@
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
 #include "HAL/stm32_spi.h"
+#include "HAL/vt_sense_adc.h"
+#include "math/protection/safety_monitor.h"
 #include "math/foc/controller.h"
 #include "math/servo_mode/encoder_pll.h"
 #include "math/servo_mode/servo_mode.h"
@@ -95,8 +97,31 @@ inline const device::motor::Params& MotorParams()
   return device::motor::kActive;
 }
 
-// Nominal DC bus for open-loop voltage→PWM scaling (no bus ADC yet).
+// Nominal DC bus used before the first vsense sample (moteus-x1 ADC5_IN2).
 inline constexpr float kBusVoltage_V = 48.0f;
+
+// moteus-x1 / family 3: vsense PA9, board FET NTC PB12. Motor NTC is not fitted.
+inline hal::VtSenseAdc::Options VtSenseOptions()
+{
+  hal::VtSenseAdc::Options options;
+  options.vsense = PA_9;
+  options.tsense = PB_12_ALT0;
+  options.vsense_adc_scale = 0.017947f;
+  options.fet_r25_ohm = 47000.0f;
+  return options;
+}
+
+inline math::protection::SafetyMonitor::Config ProtectionConfig()
+{
+  math::protection::SafetyMonitor::Config config;
+  config.overcurrent_count = 5;
+  config.i2t_tau_s = 2.0f;
+  config.bus_min_V = 8.0f;
+  config.bus_max_V = 54.0f;
+  config.fet_fault_C = 100.0f;
+  return config;
+}
+
 
 // AUX2 encoder SPI. Concrete MCU pins belong to the board composition only.
 inline hal::Stm32Spi::Options EncoderSpiOptions()

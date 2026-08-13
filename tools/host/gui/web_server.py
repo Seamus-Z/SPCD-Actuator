@@ -574,6 +574,7 @@ class CanBridge:
                         omega_cmd=msg.omega_cmd_rad_s,
                         omega_elec=msg.omega_elec_rad_s,
                         voltage_headroom=msg.voltage_headroom_v,
+                        fet_temp_c=msg.fet_temp_c,
                     )
                     sample["enc_spike"] = int(msg.enc_spike)
                     self._push_live_sample(sample)
@@ -1128,7 +1129,7 @@ class CanBridge:
     def _live_dict_locked(
         self, t: Telemetry, enc: EncTelem | None, cal: CalTelem | None,
         omega_cmd: float | None = None, omega_elec: float = 0.0,
-        voltage_headroom: float = 0.0,
+        voltage_headroom: float = 0.0, fet_temp_c: float | None = None,
     ) -> dict:
         enc_fields = {
             "enc_raw": enc.raw if enc else 0,
@@ -1166,6 +1167,7 @@ class CanBridge:
             "omega_cmd_rad_s": float(omega_cmd) if omega_cmd is not None else t.omega_rad_s,
             "omega_elec_rad_s": float(omega_elec),
             "voltage_headroom_v": float(voltage_headroom),
+            "fet_temp_c": None if fet_temp_c is None else float(fet_temp_c),
             "vd_v": t.vd_v,
             "vq_v": t.vq_v,
             "duty_a": t.duty_a,

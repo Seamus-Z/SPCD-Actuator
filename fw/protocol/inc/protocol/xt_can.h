@@ -41,7 +41,7 @@ inline constexpr uint8_t kCmdConf = 10;
 // APP firmware semver reported by kCmdInfo (bump when shipping).
 inline constexpr uint8_t kFwMajor = 0;
 inline constexpr uint8_t kFwMinor = 6;
-inline constexpr uint8_t kFwPatch = 6;
+inline constexpr uint8_t kFwPatch = 7;
 
 // Commands that answer with CtrlReply instead of ACK.
 inline constexpr bool UsesCtrlReply(uint8_t cmd)
@@ -272,7 +272,9 @@ struct CtrlReply
   int32_t theta_mech_mrad;
   int32_t omega_cmd_mrad_s;
   int32_t omega_elec_mrad_s;
-  int32_t voltage_headroom_mV;
+  // Centivolts so the last 4 bytes can also carry FET NTC (CtrlReply is 64 B).
+  int16_t voltage_headroom_cV;
+  int16_t fet_temp_dC;  // 0.1 C; INT16_MIN = invalid
 } __attribute__((packed));
 
 // Host -> device: after cmd byte for kCmdServo.
@@ -470,7 +472,7 @@ static_assert(sizeof(Info) == 34, "Info size");
 static_assert(sizeof(Telemetry) == 60, "Telemetry size");
 // hdr4 + raw2 + mech4 + elec4 + sign1 + ok1 + pad2 = 18
 static_assert(sizeof(EncTelem) == 18, "EncTelem size");
-// Original 56-byte reply plus command ω, electrical ω, and voltage headroom.
+// Original 56-byte reply plus ω_elec, headroom (cV) and FET temp (0.1 C).
 static_assert(sizeof(CtrlReply) == 64, "CtrlReply size");
 static_assert(sizeof(ServoRequest) == 48, "ServoRequest size");
 static_assert(sizeof(CalRequest) == 10, "CalRequest size");

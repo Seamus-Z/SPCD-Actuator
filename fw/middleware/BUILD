@@ -131,6 +131,7 @@ cc_library(
         "//fw/math:base",
         "//fw/math:calibration",
         "//fw/math:foc",
+        "//fw/math:protection",
         "//fw/math:servo_mode",
         "//fw/protocol:xt_can",
     ],

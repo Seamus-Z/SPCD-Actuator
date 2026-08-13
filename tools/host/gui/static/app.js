@@ -13,6 +13,7 @@ const CHANNELS = [
   { key: "vq_v", label: "Vq", path: "voltage/Vq", color: "#d08a6a", unit: "V", on: false, group: "voltage" },
   { key: "bus_v", label: "Vbus", path: "voltage/Vbus", color: "#e08a8a", unit: "V", on: false, group: "voltage" },
   { key: "voltage_headroom_v", label: "Vheadroom", path: "voltage/headroom", color: "#80c0c8", unit: "V", on: false, group: "voltage" },
+  { key: "fet_temp_c", label: "FetTemp", path: "thermal/fet", color: "#e0a060", unit: "C", on: true, group: "thermal" },
   { key: "theta_rad", label: "thetaElec", path: "motion/theta_elec", color: "#a0a8b8", unit: "rad", on: false, group: "motion" },
   { key: "omega_rad_s", label: "omegaMeas", path: "motion/omega_mech", color: "#88b0d0", unit: "rad/s", on: true, group: "motion" },
   { key: "omega_cmd_rad_s", label: "omegaCmd", path: "motion/omega_cmd", color: "#d0a088", unit: "rad/s", on: true, group: "motion" },
@@ -26,6 +27,7 @@ const CHANNELS = [
 const GROUPS = [
   { id: "current", label: "Current" },
   { id: "voltage", label: "Voltage" },
+  { id: "thermal", label: "Thermal" },
   { id: "motion", label: "Motion" },
   { id: "encoder", label: "Encoder" },
 ];

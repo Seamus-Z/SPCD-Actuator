@@ -26,6 +26,7 @@ cc_library(
         "src/fdcan.cc",
         "src/phase_current_adc.cc",
         "src/phase_pwm.cc",
+        "src/vt_sense_adc.cc",
     ],
     hdrs = [
         "inc/HAL/fdcan.h",
@@ -33,11 +34,13 @@ cc_library(
         "inc/HAL/phase_current_adc.h",
         "inc/HAL/phase_pwm.h",
         "inc/HAL/stm32_spi.h",
+        "inc/HAL/vt_sense_adc.h",
     ],
     # Physical path inc/HAL/foo.h matches #include "HAL/foo.h".
     includes = ["inc"],
     deps = [
         ":system_clock",
+        "//fw/math:protection",
         "//fw/ports:ports",
         "@com_github_ARMmbed_mbed-g4//:mbed",
     ],

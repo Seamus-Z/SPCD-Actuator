@@ -6,6 +6,8 @@
 #include "HAL/millisecond_timer.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
+#include "HAL/vt_sense_adc.h"
+#include "math/protection/safety_monitor.h"
 #include "device/drv8353s.h"
 #include "math/foc/controller.h"
 #include "math/foc/modulator.h"
@@ -79,6 +81,7 @@ class MotorControlService
     hal::MillisecondTimer* timer = nullptr;
     device::Drv8353s* gate_driver = nullptr;
     hal::PhaseCurrentAdc* current_adc = nullptr;
+    hal::VtSenseAdc* vt_sense = nullptr;
     hal::PhasePwm* phase_pwm = nullptr;
     math::foc::DqModulator* dq_modulator = nullptr;
     math::foc::FocController* foc = nullptr;
@@ -97,11 +100,32 @@ class MotorControlService
   Result StartCalibration(const CalibrationCommand& command);
   void Stop();
 
+  // Sample bus voltage / FET NTC outside the control ISR (idle telemetry).
+  void SampleSlowTelemetry();
+
   void SetCalibrationResultSink(ICalibrationResultSink* sink)
   {
     calibration_result_sink_ = sink;
   }
-  void SetOvercurrentTrip(float trip_A) { overcurrent_trip_A_ = trip_A; }
+  void SetOvercurrentTrip(float trip_A)
+  {
+    auto config = safety_.config();
+    config.overcurrent_A = trip_A;
+    safety_.set_config(config);
+  }
+  void SetProtectionConfig(const math::protection::SafetyMonitor::Config& config)
+  {
+    safety_.set_config(config);
+  }
+  math::protection::Trip last_protection_trip() const { return safety_.last_trip(); }
+  bool protection_tripped() const
+  {
+    return safety_.last_trip() != math::protection::Trip::None;
+  }
+  float measured_bus_V() const { return measured_bus_V_; }
+  float fet_temp_C() const { return fet_temp_C_; }
+  bool fet_temp_ok() const { return fet_temp_ok_; }
+
 
   bool output_enabled() const { return output_enabled_; }
   bool dq_valid() const { return dq_valid_; }
@@ -132,11 +156,12 @@ class MotorControlService
   Result PrimeFoc(float theta_rad, float id_A, float iq_A,
                   const float* theta_override);
 
-  static constexpr uint8_t kOvercurrentTripCount = 5;
+  bool ApplyProtection(const hal::PhaseCurrentAdc::Sample& sample, float dt_s);
 
   hal::MillisecondTimer* timer_ = nullptr;
   device::Drv8353s* gate_driver_ = nullptr;
   hal::PhaseCurrentAdc* current_adc_ = nullptr;
+  hal::VtSenseAdc* vt_sense_ = nullptr;
   hal::PhasePwm* phase_pwm_ = nullptr;
   math::foc::DqModulator* dq_modulator_ = nullptr;
   math::foc::FocController* foc_ = nullptr;
@@ -154,8 +179,10 @@ class MotorControlService
   float iq_A_ = 0.0f;
   hal::PhaseCurrentAdc::Sample last_current_{};
   hal::MillisecondTimer::TimerType last_control_us_ = 0;
-  float overcurrent_trip_A_ = 0.0f;
-  uint8_t overcurrent_count_ = 0;
+  math::protection::SafetyMonitor safety_;
+  float measured_bus_V_ = 0.0f;
+  float fet_temp_C_ = 0.0f;
+  bool fet_temp_ok_ = false;
 };
 
 }  // namespace middleware::control

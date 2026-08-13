@@ -4,6 +4,7 @@
 #include "HAL/millisecond_timer.h"
 #include "HAL/phase_current_adc.h"
 #include "HAL/phase_pwm.h"
+#include "HAL/vt_sense_adc.h"
 #include "application_ports.h"
 #include "device/drv8353s.h"
 
@@ -18,6 +19,7 @@ class PlatformService final : public IPlatformService
     hal::MillisecondTimer* timer = nullptr;
     device::Drv8353s* gate_driver = nullptr;
     hal::PhaseCurrentAdc* current_adc = nullptr;
+    hal::VtSenseAdc* vt_sense = nullptr;
     hal::PhasePwm* phase_pwm = nullptr;
     device::Drv8353s::Config gate_driver_config{};
   };
@@ -49,6 +51,7 @@ class PlatformService final : public IPlatformService
   hal::MillisecondTimer* timer_ = nullptr;
   device::Drv8353s* gate_driver_ = nullptr;
   hal::PhaseCurrentAdc* current_adc_ = nullptr;
+  hal::VtSenseAdc* vt_sense_ = nullptr;
   hal::PhasePwm* phase_pwm_ = nullptr;
   device::Drv8353s::Config gate_driver_config_{};
   hal::MillisecondTimer::TimerType last_timer_tick_ = 0;
