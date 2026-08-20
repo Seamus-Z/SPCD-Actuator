@@ -45,7 +45,7 @@ from xt_proto import (  # noqa: E402
     pack_servo,
     parse_frame,
     tel_id,
-)
+) 
 
 
 def open_bus(interface: str):
